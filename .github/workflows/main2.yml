@@ -1,4 +1,4 @@
-name: Ollama Server with Tunneling (20min Keep-Alive)
+name: Ollama Server with Tunneling (20min Keep-Alive fixed all)
 
 on:
   workflow_dispatch:
@@ -117,8 +117,10 @@ jobs:
           echo "✅ Cloudflared binary restored from cache"
           if /usr/local/bin/cloudflared --version; then
             echo "✅ Cached binary is valid"
+            echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Cloudflared installation completed" >> logs/timeline.log
+            exit 0
           else
-            echo "❌ Cached binary corrupted, reinstalling..."
+            echo "❌ Cached binary corrupted, cleaning up..."
             sudo rm -f /usr/local/bin/cloudflared
           fi
         fi
@@ -126,6 +128,11 @@ jobs:
         # Install if not cached or corrupted
         if [[ ! -f /usr/local/bin/cloudflared ]]; then
           echo "📥 Installing Cloudflared..."
+          
+          # Clean up any existing installations first
+          sudo apt-get remove -y cloudflared 2>/dev/null || true
+          sudo rm -f /usr/local/bin/cloudflared
+          
           # Update package lists
           sudo apt-get update -qq
           
@@ -265,17 +272,9 @@ jobs:
         
     - name: 📥 Load Model with Enhanced Caching
       run: |
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Loading model: ${{ github.event.inputs.model }}" >> logs/timeline.log
-        
         # Use custom model if provided, otherwise use default
-        if [[ -n "${{ github.event.inputs.model }}" ]]; then
-          MODEL_NAME="${{ github.event.inputs.model }}"
-          echo "📥 Using custom model: $MODEL_NAME"
-        else
-          MODEL_NAME="qwen2.5:7b"
-          echo "📥 Using default model: $MODEL_NAME"
-        fi
-        
+        MODEL_NAME="${{ github.event.inputs.model || 'qwen2.5:7b' }}"
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Loading model: $MODEL_NAME" >> logs/timeline.log
         echo "📥 Loading model: $MODEL_NAME"
         
         # Set environment for ollama commands
@@ -343,7 +342,7 @@ jobs:
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Sending webhook notification" >> logs/timeline.log
         
         TUNNEL_URL=$(cat logs/tunnel_url.txt)
-        MODEL_NAME="${{ github.event.inputs.model }}"
+        MODEL_NAME="${{ github.event.inputs.model || 'qwen2.5:7b' }}"
         
         # Create comprehensive webhook payload
         WEBHOOK_PAYLOAD=$(jq -n \
@@ -457,10 +456,40 @@ jobs:
         
         echo "✅ Lightweight monitoring started (PID: $MONITOR_PID)"
         
+    - name: 🎯 Comprehensive API Testing
+      run: |
+        TUNNEL_URL=$(cat logs/tunnel_url.txt)
+        MODEL_NAME="${{ github.event.inputs.model || 'qwen2.5:7b' }}"
+        
+        echo "🎯 Running comprehensive API tests..."
+        
+        # Test all major endpoints
+        echo "📋 Testing /api/tags:"
+        curl -s "$TUNNEL_URL/api/tags" | jq '.models[].name' || echo "❌ Tags test failed"
+        
+        echo "📋 Testing /api/ps:"
+        curl -s "$TUNNEL_URL/api/ps" | jq '.' || echo "❌ PS test failed"
+        
+        echo "📋 Testing /api/show:"
+        curl -s -X POST "$TUNNEL_URL/api/show" \
+          -H "Content-Type: application/json" \
+          -d "{\"name\": \"$MODEL_NAME\"}" | jq '.license' || echo "❌ Show test failed"
+        
+        echo "📋 Testing streaming generation:"
+        curl -s -X POST "$TUNNEL_URL/api/generate" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"model\": \"$MODEL_NAME\",
+            \"prompt\": \"Count from 1 to 3\",
+            \"stream\": true
+          }" | head -5 || echo "❌ Streaming test failed"
+        
+        echo "✅ API testing completed"
+        
     - name: 📝 Generate Server Documentation
       run: |
         TUNNEL_URL=$(cat logs/tunnel_url.txt)
-        MODEL_NAME="${{ github.event.inputs.model }}"
+        MODEL_NAME="${{ github.event.inputs.model || 'qwen2.5:7b' }}"
         
         cat > logs/server_info.md << EOF
         # 🤖 Ollama Server Information
