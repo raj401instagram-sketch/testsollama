@@ -6,7 +6,7 @@ on:
       model:
         description: 'Model to load (e.g., qwen2.5:7b, llama3.1:8b)'
         required: true
-        default: 'qwen2.5:7b'
+        default: 'qwen3:0.6b'
         type: string
       test_prompt:
         description: 'Test prompt after model loads'
@@ -456,123 +456,7 @@ jobs:
         
         echo "✅ Lightweight monitoring started (PID: $MONITOR_PID)"
         
-    - name: 🎯 Comprehensive API Testing
-      run: |
-        TUNNEL_URL=$(cat logs/tunnel_url.txt)
-        MODEL_NAME="${{ github.event.inputs.model || 'qwen2.5:7b' }}"
-        
-        echo "🎯 Running comprehensive API tests..."
-        
-        # Test all major endpoints
-        echo "📋 Testing /api/tags:"
-        curl -s "$TUNNEL_URL/api/tags" | jq '.models[].name' || echo "❌ Tags test failed"
-        
-        echo "📋 Testing /api/ps:"
-        curl -s "$TUNNEL_URL/api/ps" | jq '.' || echo "❌ PS test failed"
-        
-        echo "📋 Testing /api/show:"
-        curl -s -X POST "$TUNNEL_URL/api/show" \
-          -H "Content-Type: application/json" \
-          -d "{\"name\": \"$MODEL_NAME\"}" | jq '.license' || echo "❌ Show test failed"
-        
-        echo "📋 Testing streaming generation:"
-        curl -s -X POST "$TUNNEL_URL/api/generate" \
-          -H "Content-Type: application/json" \
-          -d "{
-            \"model\": \"$MODEL_NAME\",
-            \"prompt\": \"Count from 1 to 3\",
-            \"stream\": true
-          }" | head -5 || echo "❌ Streaming test failed"
-        
-        echo "✅ API testing completed"
-        
-    - name: 📝 Generate Server Documentation
-      run: |
-        TUNNEL_URL=$(cat logs/tunnel_url.txt)
-        MODEL_NAME="${{ github.event.inputs.model || 'qwen2.5:7b' }}"
-        
-        cat > logs/server_info.md << EOF
-        # 🤖 Ollama Server Information
-        
-        **Generated at**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
-        **Workflow Run**: [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})  
-        **Repository**: ${{ github.repository }}
-        
-        ## 🌐 Server Access
-        - **Public URL**: \`$TUNNEL_URL\`
-        - **Model Loaded**: \`$MODEL_NAME\`
-        - **Server Host**: \`0.0.0.0:11543\`
-        - **Expected Uptime**: 20 minutes from $(date -u '+%H:%M UTC')
-        
-        ## 📡 API Endpoints
-        
-        ### Generate Text (Non-streaming)
-        \`\`\`bash
-        curl -X POST $TUNNEL_URL/api/generate \\
-          -H "Content-Type: application/json" \\
-          -d '{
-            "model": "$MODEL_NAME",
-            "prompt": "Your prompt here",
-            "stream": false,
-            "options": {
-              "temperature": 0.7,
-              "top_p": 0.9
-            }
-          }'
-        \`\`\`
-        
-        ### Chat Completion
-        \`\`\`bash
-        curl -X POST $TUNNEL_URL/api/chat \\
-          -H "Content-Type: application/json" \\
-          -d '{
-            "model": "$MODEL_NAME",
-            "messages": [
-              {"role": "user", "content": "Hello! How are you?"}
-            ],
-            "stream": false
-          }'
-        \`\`\`
-        
-        ### List Models
-        \`\`\`bash
-        curl $TUNNEL_URL/api/tags
-        \`\`\`
-        
-        ### Model Information
-        \`\`\`bash
-        curl -X POST $TUNNEL_URL/api/show \\
-          -H "Content-Type: application/json" \\
-          -d '{"name": "$MODEL_NAME"}'
-        \`\`\`
-        
-        ## 📊 Current System Status
-        \`\`\`
-        $(free -h)
-        \`\`\`
-        
-        ## 🔗 Quick Test
-        \`\`\`bash
-        # Quick health check
-        curl $TUNNEL_URL/api/tags
-        
-        # Quick generation test
-        curl -X POST $TUNNEL_URL/api/generate \\
-          -H "Content-Type: application/json" \\
-          -d '{"model": "$MODEL_NAME", "prompt": "Hello!", "stream": false}'
-        \`\`\`
-        
-        ## ⚠️ Important Notes
-        - Server will automatically shutdown after 20 minutes
-        - Use the tunnel URL for external access
-        - Model responses may be slower on first request (cold start)
-        - Check the Actions logs for real-time status updates
-        
-        EOF
-        
-        echo "📝 Server documentation generated:"
-        cat logs/server_info.md
-        
+    
     - name: ⏰ Keep Server Alive (20 Minutes)
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Starting 20-minute keep-alive" >> logs/timeline.log
