@@ -73,6 +73,13 @@ jobs:
         path: /usr/local/bin/ollama
         key: ollama-binary-${{ runner.os }}-v2
         
+    - name: 📦 Cache Cloudflare Tunnel Binary
+      id: cache-cloudflared-bin
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/bin/cloudflared
+        key: cloudflared-binary-${{ runner.os }}-v2
+        
     - name: ⬇️ Install Ollama
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Installing Ollama" >> logs/timeline.log
@@ -105,12 +112,27 @@ jobs:
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Installing cloudflared" >> logs/timeline.log
         
-        # Update package lists
-        sudo apt-get update -qq
+        # Check if cached binary is valid
+        if [[ "${{ steps.cache-cloudflared-bin.outputs.cache-hit }}" == "true" ]] && [[ -f /usr/local/bin/cloudflared ]]; then
+          echo "✅ Cloudflared binary restored from cache"
+          if /usr/local/bin/cloudflared --version; then
+            echo "✅ Cached binary is valid"
+          else
+            echo "❌ Cached binary corrupted, reinstalling..."
+            sudo rm -f /usr/local/bin/cloudflared
+          fi
+        fi
         
-        # Download and install cloudflared
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-        sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
+        # Install if not cached or corrupted
+        if [[ ! -f /usr/local/bin/cloudflared ]]; then
+          echo "📥 Installing Cloudflared..."
+          # Update package lists
+          sudo apt-get update -qq
+          
+          # Download and install cloudflared
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
+        fi
         
         cloudflared --version
         echo "✅ Cloudflared installed successfully"
@@ -245,7 +267,15 @@ jobs:
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Loading model: ${{ github.event.inputs.model }}" >> logs/timeline.log
         
-        MODEL_NAME="${{ github.event.inputs.model }}"
+        # Use custom model if provided, otherwise use default
+        if [[ -n "${{ github.event.inputs.model }}" ]]; then
+          MODEL_NAME="${{ github.event.inputs.model }}"
+          echo "📥 Using custom model: $MODEL_NAME"
+        else
+          MODEL_NAME="qwen2.5:7b"
+          echo "📥 Using default model: $MODEL_NAME"
+        fi
+        
         echo "📥 Loading model: $MODEL_NAME"
         
         # Set environment for ollama commands
@@ -426,36 +456,6 @@ jobs:
         echo $MONITOR_PID > logs/monitor.pid
         
         echo "✅ Lightweight monitoring started (PID: $MONITOR_PID)"
-        
-    - name: 🎯 Comprehensive API Testing
-      run: |
-        TUNNEL_URL=$(cat logs/tunnel_url.txt)
-        MODEL_NAME="${{ github.event.inputs.model }}"
-        
-        echo "🎯 Running comprehensive API tests..."
-        
-        # Test all major endpoints
-        echo "📋 Testing /api/tags:"
-        curl -s "$TUNNEL_URL/api/tags" | jq '.models[].name' || echo "❌ Tags test failed"
-        
-        echo "📋 Testing /api/ps:"
-        curl -s "$TUNNEL_URL/api/ps" | jq '.' || echo "❌ PS test failed"
-        
-        echo "📋 Testing /api/show:"
-        curl -s -X POST "$TUNNEL_URL/api/show" \
-          -H "Content-Type: application/json" \
-          -d "{\"name\": \"$MODEL_NAME\"}" | jq '.license' || echo "❌ Show test failed"
-        
-        echo "📋 Testing streaming generation:"
-        curl -s -X POST "$TUNNEL_URL/api/generate" \
-          -H "Content-Type: application/json" \
-          -d "{
-            \"model\": \"$MODEL_NAME\",
-            \"prompt\": \"Count from 1 to 3\",
-            \"stream\": true
-          }" | head -5 || echo "❌ Streaming test failed"
-        
-        echo "✅ API testing completed"
         
     - name: 📝 Generate Server Documentation
       run: |
