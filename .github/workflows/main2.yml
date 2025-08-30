@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: 'Model to load (e.g., gpt-oss:20b, llama2:7b)'
+        description: 'Model to load (e.g., qwen2.5:7b, llama3.1:8b)'
         required: true
-        default: 'qwen3:latest'
+        default: 'qwen2.5:7b'
         type: string
       test_prompt:
         description: 'Test prompt after model loads'
@@ -21,14 +21,14 @@ env:
 
 jobs:
   ollama-server:
-    runs-on: ubuntu-latest  # 32GB RAM runner for better performance
-    timeout-minutes: 40  # Buffer for 20min keep-alive + cleanup
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     
     steps:
     - name: 🚀 Checkout repository
       uses: actions/checkout@v4
       
-    - name: 📊 System Information & Logging Setup
+    - name: 📊 System Information & Setup
       run: |
         echo "==================== SYSTEM INFO ===================="
         echo "🕐 Workflow started at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -40,63 +40,73 @@ jobs:
         lscpu | grep "Model name"
         echo "💿 Disk Info:"
         df -h /
+        echo "👤 User Info:"
+        whoami
+        id
         echo "🌐 Network Info:"
         ip route show default
         echo "=================================================="
         
-        # Create logs directory
+        # Create logs directory with proper permissions
         mkdir -p logs
+        chmod 755 logs
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Workflow started" >> logs/timeline.log
         
+        # Create .ollama directory with proper permissions
+        mkdir -p /home/runner/.ollama
+        chmod 755 /home/runner/.ollama
+        
+    - name: 📦 Cache Ollama Models Directory
+      id: cache-ollama-models
+      uses: actions/cache@v4
+      with:
+        path: /home/runner/.ollama
+        key: ollama-models-${{ runner.os }}-${{ github.event.inputs.model }}-v2
+        restore-keys: |
+          ollama-models-${{ runner.os }}-${{ github.event.inputs.model }}-
+          ollama-models-${{ runner.os }}-
+          
     - name: 📦 Cache Ollama Binary
       id: cache-ollama-bin
       uses: actions/cache@v4
       with:
         path: /usr/local/bin/ollama
-        key: ollama-binary-${{ runner.os }}-v1
-        restore-keys: |
-          ollama-binary-${{ runner.os }}-
-          
-    - name: 📦 Cache Ollama Models Directory
-      id: cache-ollama-models
-      uses: actions/cache@v4
-      with:
-        path: ~/.ollama
-        key: ollama-models-${{ runner.os }}-${{ github.event.inputs.model }}-v1
-        restore-keys: |
-          ollama-models-${{ runner.os }}-${{ github.event.inputs.model }}-
-          ollama-models-${{ runner.os }}-
-          
-    - name: 📦 Cache System Dependencies
-      id: cache-deps
-      uses: actions/cache@v4
-      with:
-        path: |
-          /var/cache/apt
-          /var/lib/apt
-        key: system-deps-${{ runner.os }}-v1
+        key: ollama-binary-${{ runner.os }}-v2
         
-    - name: ⬇️ Install/Update Ollama
+    - name: ⬇️ Install Ollama
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Installing Ollama" >> logs/timeline.log
         
-        if [[ "${{ steps.cache-ollama-bin.outputs.cache-hit }}" == "true" ]]; then
+        # Check if cached binary is valid
+        if [[ "${{ steps.cache-ollama-bin.outputs.cache-hit }}" == "true" ]] && [[ -f /usr/local/bin/ollama ]]; then
           echo "✅ Ollama binary restored from cache"
-          ollama --version || (echo "❌ Cached binary corrupted, reinstalling..." && rm -f /usr/local/bin/ollama)
+          if /usr/local/bin/ollama --version; then
+            echo "✅ Cached binary is valid"
+          else
+            echo "❌ Cached binary corrupted, reinstalling..."
+            sudo rm -f /usr/local/bin/ollama
+          fi
         fi
         
+        # Install if not cached or corrupted
         if [[ ! -f /usr/local/bin/ollama ]]; then
-          echo "📥 Downloading fresh Ollama binary..."
+          echo "📥 Installing Ollama..."
           curl -fsSL https://ollama.com/install.sh | sh
-          echo "✅ Ollama installed successfully"
         fi
         
+        # Verify installation
         ollama --version
+        which ollama
+        ls -la /usr/local/bin/ollama
+        
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Ollama installation completed" >> logs/timeline.log
         
-    - name: 🔧 Install Cloudflare Tunnel (cloudflared)
+    - name: 🔧 Install Cloudflare Tunnel
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Installing cloudflared" >> logs/timeline.log
+        
+        # Update package lists
+        sudo apt-get update -qq
         
         # Download and install cloudflared
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
@@ -106,126 +116,199 @@ jobs:
         echo "✅ Cloudflared installed successfully"
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Cloudflared installation completed" >> logs/timeline.log
         
-    - name: 🧹 Cleanup Previous Ollama Processes
+    - name: 🧹 Cleanup & Prepare Environment
       run: |
-        echo "🧹 Cleaning up any existing Ollama processes..."
-        pkill -f ollama || echo "No existing Ollama processes found"
-        sleep 2
+        echo "🧹 Cleaning up environment..."
         
-        # Ensure clean state
-        ps aux | grep ollama | grep -v grep || echo "✅ No Ollama processes running"
+        # Kill any existing processes
+        sudo pkill -f ollama || echo "No existing Ollama processes"
+        sudo pkill -f cloudflared || echo "No existing cloudflared processes"
+        
+        # Wait for cleanup
+        sleep 3
+        
+        # Verify no processes are running
+        ps aux | grep -E "(ollama|cloudflared)" | grep -v grep || echo "✅ Environment clean"
+        
+        # Ensure proper permissions for .ollama directory
+        sudo chown -R runner:runner /home/runner/.ollama
+        chmod -R 755 /home/runner/.ollama
+        
+        # Set environment variables for Ollama
+        export OLLAMA_HOST=0.0.0.0:11543
+        export OLLAMA_MODELS=/home/runner/.ollama/models
+        export OLLAMA_ORIGINS="*"
+        
+        echo "✅ Environment prepared"
         
     - name: 🚀 Start Ollama Server
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Starting Ollama server" >> logs/timeline.log
-        echo "🚀 Starting Ollama server with OLLAMA_HOST=$OLLAMA_HOST..."
+        echo "🚀 Starting Ollama server..."
         
-        # Start Ollama server in background with proper host binding
-        nohup OLLAMA_HOST=0.0.0.0:11543 ollama serve > logs/ollama-server.log 2>&1 &
+        # Set environment variables
+        export OLLAMA_HOST=0.0.0.0:11543
+        export OLLAMA_MODELS=/home/runner/.ollama/models
+        export OLLAMA_ORIGINS="*"
+        export OLLAMA_KEEP_ALIVE=30m
+        
+        # Start Ollama server in background
+        nohup ollama serve > logs/ollama-server.log 2>&1 &
         OLLAMA_PID=$!
         echo $OLLAMA_PID > logs/ollama.pid
         
         echo "📋 Ollama PID: $OLLAMA_PID"
         echo "⏳ Waiting for Ollama to start..."
         
-        # Wait for Ollama to be ready with robust checking
-        for i in {1..30}; do
+        # Wait for Ollama to be ready with better error handling
+        for i in {1..45}; do
           if curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
             echo "✅ Ollama server is ready!"
+            echo "📋 Ollama responding on port 11543"
             break
           fi
-          echo "⏳ Attempt $i/30: Waiting for Ollama..."
-          sleep 2
+          
+          if [[ $i -eq 45 ]]; then
+            echo "❌ Ollama failed to start after 45 attempts"
+            echo "📋 Server logs:"
+            tail -20 logs/ollama-server.log 2>/dev/null || echo "No server logs found"
+            echo "📋 Process status:"
+            ps aux | grep ollama | grep -v grep || echo "No Ollama process found"
+            exit 1
+          fi
+          
+          echo "⏳ Attempt $i/45: Waiting for Ollama... ($(date '+%H:%M:%S'))"
+          sleep 3
         done
         
-        # Verify Ollama is actually running
-        if ! curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
-          echo "❌ Ollama failed to start properly"
-          echo "📋 Server logs:"
-          cat logs/ollama-server.log || echo "No server logs found"
-          exit 1
-        fi
+        # Verify server is properly bound
+        echo "📋 Network status:"
+        netstat -tlnp | grep 11543 || echo "Port 11543 not found in netstat"
+        
+        echo "📋 Testing local connection:"
+        curl -v http://0.0.0.0:11543/api/tags 2>&1 | head -10
         
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Ollama server started successfully" >> logs/timeline.log
         
     - name: 🌐 Setup Cloudflare Tunnel
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Setting up tunnel" >> logs/timeline.log
-        echo "🌐 Starting Cloudflare tunnel for Ollama server..."
+        echo "🌐 Starting Cloudflare tunnel..."
         
-        # Start tunnel in background
-        nohup cloudflared tunnel --url http://0.0.0.0:11543 > logs/tunnel.log 2>&1 &
+        # Start tunnel in background with proper error handling
+        nohup cloudflared tunnel --url http://0.0.0.0:11543 --no-autoupdate > logs/tunnel.log 2>&1 &
         TUNNEL_PID=$!
         echo $TUNNEL_PID > logs/tunnel.pid
         
         echo "📋 Tunnel PID: $TUNNEL_PID"
         echo "⏳ Waiting for tunnel to establish..."
         
-        # Wait for tunnel URL with robust parsing
-        for i in {1..60}; do
+        # Wait for tunnel URL with improved parsing
+        TUNNEL_URL=""
+        for i in {1..90}; do
           if [[ -f logs/tunnel.log ]]; then
-            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' logs/tunnel.log | head -1)
+            # Look for the tunnel URL in various formats
+            TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' logs/tunnel.log | head -1)
+            
             if [[ ! -z "$TUNNEL_URL" ]]; then
               echo "✅ Tunnel established: $TUNNEL_URL"
               echo "$TUNNEL_URL" > logs/tunnel_url.txt
-              break
+              
+              # Test tunnel connectivity
+              sleep 5
+              if curl -sf "$TUNNEL_URL/api/tags" >/dev/null 2>&1; then
+                echo "✅ Tunnel is accessible and working"
+                break
+              else
+                echo "⚠️  Tunnel URL found but not accessible yet, continuing to wait..."
+              fi
             fi
           fi
-          echo "⏳ Attempt $i/60: Waiting for tunnel URL..."
+          
+          if [[ $i -eq 90 ]]; then
+            echo "❌ Failed to establish tunnel after 90 attempts"
+            echo "📋 Tunnel logs:"
+            cat logs/tunnel.log 2>/dev/null || echo "No tunnel logs found"
+            echo "📋 Process status:"
+            ps aux | grep cloudflared | grep -v grep || echo "No cloudflared process found"
+            exit 1
+          fi
+          
+          echo "⏳ Attempt $i/90: Waiting for tunnel URL... ($(date '+%H:%M:%S'))"
           sleep 2
         done
-        
-        if [[ -z "$TUNNEL_URL" ]]; then
-          echo "❌ Failed to get tunnel URL"
-          echo "📋 Tunnel logs:"
-          cat logs/tunnel.log || echo "No tunnel logs found"
-          exit 1
-        fi
         
         echo "🌐 Public Ollama URL: $TUNNEL_URL"
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Tunnel established: $TUNNEL_URL" >> logs/timeline.log
         
-    - name: 📥 Load Model with Caching
+    - name: 📥 Load Model with Enhanced Caching
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Loading model: ${{ github.event.inputs.model }}" >> logs/timeline.log
         
         MODEL_NAME="${{ github.event.inputs.model }}"
         echo "📥 Loading model: $MODEL_NAME"
         
-        # Check if model already exists in cache
-        if [[ "${{ steps.cache-ollama-models.outputs.cache-hit }}" == "true" ]]; then
-          echo "✅ Model cache restored, verifying model availability..."
-          OLLAMA_HOST=0.0.0.0:11543 ollama list | grep "$MODEL_NAME" && echo "✅ Model found in cache" || echo "⚠️  Model not in cache, will download"
+        # Set environment for ollama commands
+        export OLLAMA_HOST=0.0.0.0:11543
+        
+        # Check current models
+        echo "📋 Checking available models:"
+        ollama list || echo "No models currently available"
+        
+        # Check if model exists in cache
+        MODEL_EXISTS=false
+        if ollama list | grep -q "$MODEL_NAME"; then
+          echo "✅ Model found in local cache"
+          MODEL_EXISTS=true
+        else
+          echo "📥 Model not found, will download..."
         fi
         
-        # Pull model if not available
-        if ! OLLAMA_HOST=0.0.0.0:11543 ollama list | grep -q "$MODEL_NAME"; then
+        # Download model if needed
+        if [[ "$MODEL_EXISTS" == "false" ]]; then
           echo "📥 Downloading model: $MODEL_NAME"
           echo "⚠️  This may take several minutes for large models..."
           
-          # Monitor memory during download
+          # Start memory monitoring
           nohup bash -c 'while true; do echo "$(date): $(free -h | grep Mem:)" >> logs/memory-monitor.log; sleep 30; done' &
           MONITOR_PID=$!
           echo $MONITOR_PID > logs/monitor.pid
           
-          # Pull model with timeout
-          timeout 900 OLLAMA_HOST=0.0.0.0:11543 ollama pull "$MODEL_NAME" || {
-            echo "❌ Model download failed or timed out"
-            kill $MONITOR_PID 2>/dev/null || true
-            exit 1
-          }
+          # Download with extended timeout and retry logic
+          DOWNLOAD_SUCCESS=false
+          for attempt in {1..3}; do
+            echo "📥 Download attempt $attempt/3..."
+            if timeout 1200 ollama pull "$MODEL_NAME"; then
+              DOWNLOAD_SUCCESS=true
+              break
+            else
+              echo "⚠️  Download attempt $attempt failed, retrying..."
+              sleep 10
+            fi
+          done
           
+          # Stop monitoring
           kill $MONITOR_PID 2>/dev/null || true
+          
+          if [[ "$DOWNLOAD_SUCCESS" == "false" ]]; then
+            echo "❌ Failed to download model after 3 attempts"
+            exit 1
+          fi
+          
           echo "✅ Model downloaded successfully"
-        else
-          echo "✅ Model already available"
         fi
         
-        echo "📋 Available models:"
-        OLLAMA_HOST=0.0.0.0:11543 ollama list
+        # Verify model is loaded
+        echo "📋 Final model list:"
+        ollama list
+        
+        # Pre-load model to ensure it's ready
+        echo "🔄 Pre-loading model for faster responses..."
+        timeout 60 ollama run "$MODEL_NAME" "test" >/dev/null 2>&1 || echo "Pre-load completed"
+        
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Model loading completed" >> logs/timeline.log
         
-    - name: 🧪 Test Model & Tunnel
+    - name: 🧪 Test Model & Tunnel Connectivity
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Testing model and tunnel" >> logs/timeline.log
         
@@ -233,32 +316,62 @@ jobs:
         TUNNEL_URL=$(cat logs/tunnel_url.txt)
         TEST_PROMPT="${{ github.event.inputs.test_prompt }}"
         
-        echo "🧪 Testing model locally..."
+        export OLLAMA_HOST=0.0.0.0:11543
         
-        # Test local Ollama
-        LOCAL_TEST=$(curl -s -X POST http://0.0.0.:11543/api/generate \
+        echo "🧪 Testing local Ollama server..."
+        
+        # Test local API endpoints
+        echo "📋 Testing /api/tags:"
+        curl -sf http://0.0.0.0:11543/api/tags | jq '.' || echo "❌ Tags endpoint failed"
+        
+        echo "📋 Testing model generation locally..."
+        LOCAL_RESPONSE=$(curl -s -X POST http://0.0.0.0:11543/api/generate \
           -H "Content-Type: application/json" \
           -d "{
             \"model\": \"$MODEL_NAME\",
             \"prompt\": \"$TEST_PROMPT\",
-            \"stream\": false
-          }" | jq -r '.response' 2>/dev/null || echo "Local test failed")
+            \"stream\": false,
+            \"options\": {
+              \"temperature\": 0.7,
+              \"top_p\": 0.9
+            }
+          }" | jq -r '.response // "Generation failed"' 2>/dev/null)
         
-        echo "📋 Local test result: $LOCAL_TEST"
+        echo "📋 Local generation result:"
+        echo "$LOCAL_RESPONSE"
         
         echo "🌐 Testing tunnel access..."
         
-        # Test tunnel access
-        TUNNEL_TEST=$(curl -s -X POST "$TUNNEL_URL/api/generate" \
+        # Test tunnel endpoints
+        echo "📋 Testing tunnel /api/tags:"
+        curl -sf "$TUNNEL_URL/api/tags" | jq '.' || echo "❌ Tunnel tags endpoint failed"
+        
+        echo "📋 Testing model generation via tunnel..."
+        TUNNEL_RESPONSE=$(curl -s -X POST "$TUNNEL_URL/api/generate" \
           -H "Content-Type: application/json" \
           -d "{
             \"model\": \"$MODEL_NAME\",
             \"prompt\": \"$TEST_PROMPT\",
-            \"stream\": false
-          }" | jq -r '.response' 2>/dev/null || echo "Tunnel test failed")
+            \"stream\": false,
+            \"options\": {
+              \"temperature\": 0.7,
+              \"top_p\": 0.9
+            }
+          }" | jq -r '.response // "Generation failed"' 2>/dev/null)
         
-        echo "📋 Tunnel test result: $TUNNEL_TEST"
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Testing completed" >> logs/timeline.log
+        echo "📋 Tunnel generation result:"
+        echo "$TUNNEL_RESPONSE"
+        
+        # Verify both tests passed
+        if [[ "$LOCAL_RESPONSE" == "Generation failed" ]] || [[ "$TUNNEL_RESPONSE" == "Generation failed" ]]; then
+          echo "❌ One or both tests failed"
+          echo "📋 Ollama server logs:"
+          tail -50 logs/ollama-server.log || echo "No server logs available"
+          exit 1
+        fi
+        
+        echo "✅ All connectivity tests passed"
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Testing completed successfully" >> logs/timeline.log
         
     - name: 📡 Send Webhook Notification
       run: |
@@ -267,94 +380,159 @@ jobs:
         TUNNEL_URL=$(cat logs/tunnel_url.txt)
         MODEL_NAME="${{ github.event.inputs.model }}"
         
-        # Prepare webhook payload
-        WEBHOOK_PAYLOAD=$(cat <<EOF
-        {
-          "event": "ollama_server_ready",
-          "timestamp": "$(date -u '+%Y-%m-%d %H:%M:%S UTC')",
-          "workflow_run_id": "${{ github.run_id }}",
-          "repository": "${{ github.repository }}",
-          "model": "$MODEL_NAME",
-          "ollama_url": "$TUNNEL_URL",
-          "api_endpoints": {
-            "generate": "$TUNNEL_URL/api/generate",
-            "chat": "$TUNNEL_URL/api/chat",
-            "embeddings": "$TUNNEL_URL/api/embeddings",
-            "models": "$TUNNEL_URL/api/tags"
-          },
-          "server_status": "running",
-          "estimated_uptime": "20 minutes"
-        }
-        EOF
+        # Create comprehensive webhook payload
+        WEBHOOK_PAYLOAD=$(jq -n \
+          --arg event "ollama_server_ready" \
+          --arg timestamp "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
+          --arg workflow_run_id "${{ github.run_id }}" \
+          --arg repository "${{ github.repository }}" \
+          --arg model "$MODEL_NAME" \
+          --arg ollama_url "$TUNNEL_URL" \
+          --arg status "running" \
+          --arg uptime "20 minutes" \
+          '{
+            event: $event,
+            timestamp: $timestamp,
+            workflow_run_id: $workflow_run_id,
+            repository: $repository,
+            model: $model,
+            ollama_url: $ollama_url,
+            api_endpoints: {
+              generate: ($ollama_url + "/api/generate"),
+              chat: ($ollama_url + "/api/chat"),
+              embeddings: ($ollama_url + "/api/embeddings"),
+              models: ($ollama_url + "/api/tags"),
+              show: ($ollama_url + "/api/show"),
+              ps: ($ollama_url + "/api/ps")
+            },
+            server_status: $status,
+            estimated_uptime: $uptime,
+            runner_info: {
+              os: "ubuntu-latest",
+              memory: "32GB",
+              host: "0.0.0.0:11543"
+            }
+          }'
         )
         
         echo "📡 Sending webhook notification..."
-        echo "📋 Payload: $WEBHOOK_PAYLOAD"
+        echo "📋 Payload preview:"
+        echo "$WEBHOOK_PAYLOAD" | jq '.'
         
-        # Send webhook with retry logic
-        for i in {1..3}; do
+        # Send webhook with enhanced retry logic
+        WEBHOOK_SENT=false
+        for i in {1..5}; do
           if curl -X POST "$WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "$WEBHOOK_PAYLOAD" \
             --max-time 30 \
-            --retry 2; then
+            --retry 1 \
+            --retry-delay 5 \
+            -w "HTTP: %{http_code}, Time: %{time_total}s\n"; then
             echo "✅ Webhook sent successfully (attempt $i)"
+            WEBHOOK_SENT=true
             break
           else
-            echo "⚠️  Webhook attempt $i failed, retrying..."
-            sleep 5
+            echo "⚠️  Webhook attempt $i failed, retrying in 10 seconds..."
+            sleep 10
           fi
         done
         
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Webhook notification sent" >> logs/timeline.log
+        if [[ "$WEBHOOK_SENT" == "false" ]]; then
+          echo "❌ All webhook attempts failed, continuing without notification"
+        fi
         
-    - name: 📊 Memory & Process Monitoring Setup
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Webhook notification completed" >> logs/timeline.log
+        
+    - name: 📊 Setup Continuous Monitoring
       run: |
-        echo "📊 Setting up continuous monitoring..."
+        echo "📊 Setting up system monitoring..."
         
-        # Create monitoring script
+        # Create enhanced monitoring script
         cat > monitor.sh << 'EOF'
         #!/bin/bash
+        LOG_FILE="logs/monitor.log"
+        MODEL_NAME="${{ github.event.inputs.model }}"
+        
         while true; do
-          echo "=== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
-          echo "Memory:"
-          free -h
-          echo "Top processes:"
-          ps aux --sort=-%mem | head -5
-          echo "Ollama status:"
-          curl -s http://0.0.0.0:11543/api/tags | jq '.models[].name' 2>/dev/null || echo "Ollama not responding"
-          echo "============================================"
+          echo "=== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ===" >> "$LOG_FILE"
+          
+          # Memory status
+          echo "Memory Usage:" >> "$LOG_FILE"
+          free -h >> "$LOG_FILE"
+          
+          # Top processes by memory
+          echo "Top Memory Processes:" >> "$LOG_FILE"
+          ps aux --sort=-%mem | head -5 >> "$LOG_FILE"
+          
+          # Ollama service status
+          echo "Ollama Health Check:" >> "$LOG_FILE"
+          if curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
+            echo "✅ Ollama API responding" >> "$LOG_FILE"
+            # Quick model test every 5 minutes
+            if [[ $(($(date +%s) % 300)) -eq 0 ]]; then
+              echo "Testing model responsiveness..." >> "$LOG_FILE"
+              RESPONSE=$(curl -s -X POST http://0.0.0.0:11543/api/generate \
+                -H "Content-Type: application/json" \
+                -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"ping\", \"stream\": false}" \
+                | jq -r '.response // "failed"' 2>/dev/null)
+              echo "Model test: $RESPONSE" >> "$LOG_FILE"
+            fi
+          else
+            echo "❌ Ollama API not responding" >> "$LOG_FILE"
+          fi
+          
+          # Tunnel status
+          TUNNEL_URL=$(cat logs/tunnel_url.txt 2>/dev/null)
+          if [[ ! -z "$TUNNEL_URL" ]]; then
+            if curl -sf "$TUNNEL_URL/api/tags" >/dev/null 2>&1; then
+              echo "✅ Tunnel accessible" >> "$LOG_FILE"
+            else
+              echo "❌ Tunnel not accessible" >> "$LOG_FILE"
+            fi
+          fi
+          
+          echo "============================================" >> "$LOG_FILE"
           sleep 60
         done
         EOF
         
         chmod +x monitor.sh
-        nohup ./monitor.sh > logs/monitor.log 2>&1 &
+        nohup ./monitor.sh &
         MONITOR_PID=$!
         echo $MONITOR_PID > logs/monitor.pid
         
         echo "✅ Monitoring started (PID: $MONITOR_PID)"
         
-    - name: 🎯 API Endpoint Testing
+    - name: 🎯 Comprehensive API Testing
       run: |
         TUNNEL_URL=$(cat logs/tunnel_url.txt)
         MODEL_NAME="${{ github.event.inputs.model }}"
         
-        echo "🎯 Testing all API endpoints..."
+        echo "🎯 Running comprehensive API tests..."
         
-        # Test /api/tags
-        echo "📋 Testing /api/tags endpoint:"
-        curl -s "$TUNNEL_URL/api/tags" | jq '.' || echo "❌ Tags endpoint failed"
+        # Test all major endpoints
+        echo "📋 Testing /api/tags:"
+        curl -s "$TUNNEL_URL/api/tags" | jq '.models[].name' || echo "❌ Tags test failed"
         
-        # Test /api/ps
-        echo "📋 Testing /api/ps endpoint:"
-        curl -s "$TUNNEL_URL/api/ps" | jq '.' || echo "❌ PS endpoint failed"
+        echo "📋 Testing /api/ps:"
+        curl -s "$TUNNEL_URL/api/ps" | jq '.' || echo "❌ PS test failed"
         
-        # Test model loading status
-        echo "📋 Testing model status:"
+        echo "📋 Testing /api/show:"
         curl -s -X POST "$TUNNEL_URL/api/show" \
           -H "Content-Type: application/json" \
-          -d "{\"name\": \"$MODEL_NAME\"}" | jq '.' || echo "❌ Model info failed"
+          -d "{\"name\": \"$MODEL_NAME\"}" | jq '.license' || echo "❌ Show test failed"
+        
+        echo "📋 Testing streaming generation:"
+        curl -s -X POST "$TUNNEL_URL/api/generate" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"model\": \"$MODEL_NAME\",
+            \"prompt\": \"Count from 1 to 3\",
+            \"stream\": true
+          }" | head -5 || echo "❌ Streaming test failed"
+        
+        echo "✅ API testing completed"
         
     - name: 📝 Generate Server Documentation
       run: |
@@ -364,44 +542,83 @@ jobs:
         cat > logs/server_info.md << EOF
         # 🤖 Ollama Server Information
         
-        **Generated at**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        **Workflow Run**: ${{ github.run_id }}
+        **Generated at**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
+        **Workflow Run**: [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})  
         **Repository**: ${{ github.repository }}
         
-        ## 🌐 Server Details
-        - **Public URL**: $TUNNEL_URL
-        - **Model Loaded**: $MODEL_NAME
-        - **Expected Uptime**: 20 minutes from start
+        ## 🌐 Server Access
+        - **Public URL**: \`$TUNNEL_URL\`
+        - **Model Loaded**: \`$MODEL_NAME\`
+        - **Server Host**: \`0.0.0.0:11543\`
+        - **Expected Uptime**: 20 minutes from $(date -u '+%H:%M UTC')
         
         ## 📡 API Endpoints
-        \`\`\`bash
-        # List models
-        curl $TUNNEL_URL/api/tags
         
-        # Generate text
+        ### Generate Text (Non-streaming)
+        \`\`\`bash
         curl -X POST $TUNNEL_URL/api/generate \\
           -H "Content-Type: application/json" \\
           -d '{
             "model": "$MODEL_NAME",
             "prompt": "Your prompt here",
-            "stream": false
+            "stream": false,
+            "options": {
+              "temperature": 0.7,
+              "top_p": 0.9
+            }
           }'
+        \`\`\`
         
-        # Chat completion
+        ### Chat Completion
+        \`\`\`bash
         curl -X POST $TUNNEL_URL/api/chat \\
           -H "Content-Type: application/json" \\
           -d '{
             "model": "$MODEL_NAME",
-            "messages": [{"role": "user", "content": "Hello!"}]
+            "messages": [
+              {"role": "user", "content": "Hello! How are you?"}
+            ],
+            "stream": false
           }'
         \`\`\`
         
-        ## 📊 System Status
+        ### List Models
+        \`\`\`bash
+        curl $TUNNEL_URL/api/tags
+        \`\`\`
+        
+        ### Model Information
+        \`\`\`bash
+        curl -X POST $TUNNEL_URL/api/show \\
+          -H "Content-Type: application/json" \\
+          -d '{"name": "$MODEL_NAME"}'
+        \`\`\`
+        
+        ## 📊 Current System Status
+        \`\`\`
         $(free -h)
+        \`\`\`
+        
+        ## 🔗 Quick Test
+        \`\`\`bash
+        # Quick health check
+        curl $TUNNEL_URL/api/tags
+        
+        # Quick generation test
+        curl -X POST $TUNNEL_URL/api/generate \\
+          -H "Content-Type: application/json" \\
+          -d '{"model": "$MODEL_NAME", "prompt": "Hello!", "stream": false}'
+        \`\`\`
+        
+        ## ⚠️ Important Notes
+        - Server will automatically shutdown after 20 minutes
+        - Use the tunnel URL for external access
+        - Model responses may be slower on first request (cold start)
+        - Check the Actions logs for real-time status updates
         
         EOF
         
-        echo "📝 Server documentation generated"
+        echo "📝 Server documentation generated:"
         cat logs/server_info.md
         
     - name: ⏰ Keep Server Alive (20 Minutes)
@@ -411,7 +628,13 @@ jobs:
         echo "🌐 Server accessible at: $(cat logs/tunnel_url.txt)"
         
         START_TIME=$(date +%s)
-        DURATION=$((20 * 60))  # 20 minutes in seconds
+        DURATION=$((20 * 60))  # 20 minutes
+        MODEL_NAME="${{ github.event.inputs.model }}"
+        TUNNEL_URL=$(cat logs/tunnel_url.txt)
+        
+        export OLLAMA_HOST=0.0.0.0:11543
+        
+        echo "📊 Starting keep-alive loop..."
         
         while true; do
           CURRENT_TIME=$(date +%s)
@@ -419,98 +642,177 @@ jobs:
           REMAINING=$((DURATION - ELAPSED))
           
           if [[ $REMAINING -le 0 ]]; then
-            echo "⏰ 20 minutes elapsed, ending keep-alive"
+            echo "⏰ 20 minutes completed, ending keep-alive"
             break
           fi
           
           MINUTES_LEFT=$((REMAINING / 60))
           SECONDS_LEFT=$((REMAINING % 60))
           
-          echo "⏰ Server running... Time remaining: ${MINUTES_LEFT}m ${SECONDS_LEFT}s"
+          echo "⏰ Server active... Time remaining: ${MINUTES_LEFT}m ${SECONDS_LEFT}s ($(date '+%H:%M:%S'))"
           
-          # Health check every minute
+          # Health checks every minute
+          HEALTH_OK=true
+          
+          # Check local Ollama
           if ! curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
-            echo "❌ Ollama server health check failed!"
-            echo "🔧 Attempting to restart Ollama..."
+            echo "❌ Local Ollama health check failed!"
+            HEALTH_OK=false
+          fi
+          
+          # Check tunnel
+          if ! curl -sf "$TUNNEL_URL/api/tags" >/dev/null 2>&1; then
+            echo "❌ Tunnel health check failed!"
+            HEALTH_OK=false
+          fi
+          
+          # Restart services if health check fails
+          if [[ "$HEALTH_OK" == "false" ]]; then
+            echo "🔧 Health check failed, attempting service recovery..."
             
-            pkill -f ollama || true
-            sleep 3
-            nohup OLLAMA_HOST=0.0.0.0:11543 ollama serve > logs/ollama-server-restart.log 2>&1 &
-            echo $! > logs/ollama-restart.pid
+            # Check if Ollama process is still running
+            if ! pgrep -f ollama >/dev/null; then
+              echo "🔧 Restarting Ollama server..."
+              nohup ollama serve > logs/ollama-server-restart.log 2>&1 &
+              echo $! > logs/ollama-restart.pid
+              
+              # Wait for restart
+              for j in {1..30}; do
+                if curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
+                  echo "✅ Ollama restarted successfully"
+                  break
+                fi
+                sleep 2
+              done
+            fi
             
-            sleep 10
-            if curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
-              echo "✅ Ollama restarted successfully"
-            else
-              echo "❌ Failed to restart Ollama"
-              break
+            # Check if tunnel process is still running
+            if ! pgrep -f cloudflared >/dev/null; then
+              echo "🔧 Restarting tunnel..."
+              nohup cloudflared tunnel --url http://0.0.0.0:11543 --no-autoupdate > logs/tunnel-restart.log 2>&1 &
+              echo $! > logs/tunnel-restart.pid
+              sleep 10
             fi
           fi
           
-          # Log status every 5 minutes
+          # Status report every 5 minutes
           if [[ $((ELAPSED % 300)) -eq 0 ]] && [[ $ELAPSED -gt 0 ]]; then
-            echo "📊 Status at $(date -u '+%Y-%m-%d %H:%M:%S UTC'):"
-            free -h | grep Mem:
-            echo "🔥 Top memory processes:"
-            ps aux --sort=-%mem | head -3
+            echo "📊 5-minute status report ($(date -u '+%Y-%m-%d %H:%M:%S UTC')):"
+            echo "  💾 Memory: $(free -h | grep Mem: | awk '{print $3"/"$2}')"
+            echo "  🖥️  CPU Load: $(uptime | awk -F'load average:' '{ print $2 }')"
+            echo "  🔥 Top process: $(ps aux --sort=-%mem | head -2 | tail -1 | awk '{print $11}')"
             
-            # Test a quick generation to ensure model is responsive
-            curl -s -X POST http://0.0.0.0:11543/api/generate \
+            # Quick model responsiveness test
+            echo "  🧪 Testing model response..."
+            QUICK_TEST=$(curl -s -X POST http://0.0.0.0:11543/api/generate \
               -H "Content-Type: application/json" \
-              -d '{"model": "'$MODEL_NAME'", "prompt": "ping", "stream": false}' \
-              | jq -r '.response' || echo "Model test failed"
+              -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"hi\", \"stream\": false}" \
+              | jq -r '.response // "failed"' 2>/dev/null)
+            
+            if [[ "$QUICK_TEST" != "failed" ]] && [[ ! -z "$QUICK_TEST" ]]; then
+              echo "  ✅ Model responsive"
+            else
+              echo "  ⚠️  Model response slow or failed"
+            fi
           fi
           
           sleep 30
         done
         
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Keep-alive completed" >> logs/timeline.log
-  
-    - name: 📋 Final Logs & Cleanup
+        
+    - name: 📊 Final Status Report
+      if: always()
+      run: |
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Generating final report" >> logs/timeline.log
+        
+        echo "==================== FINAL STATUS REPORT ===================="
+        echo "🕐 Workflow ending at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        
+        # Server status
+        echo "🖥️  Final server status:"
+        if curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
+          echo "  ✅ Ollama server: Running"
+        else
+          echo "  ❌ Ollama server: Not responding"
+        fi
+        
+        # Tunnel status
+        TUNNEL_URL=$(cat logs/tunnel_url.txt 2>/dev/null)
+        if [[ ! -z "$TUNNEL_URL" ]]; then
+          if curl -sf "$TUNNEL_URL/api/tags" >/dev/null 2>&1; then
+            echo "  ✅ Tunnel: Accessible"
+          else
+            echo "  ❌ Tunnel: Not accessible"
+          fi
+          echo "  🌐 Final URL: $TUNNEL_URL"
+        else
+          echo "  ❌ Tunnel: URL not found"
+        fi
+        
+        # Resource usage
+        echo "💾 Final memory status:"
+        free -h
+        
+        echo "🔄 Process status:"
+        ps aux | grep -E "(ollama|cloudflared)" | grep -v grep || echo "  No processes found"
+        
+        # Model status
+        echo "📋 Final model list:"
+        OLLAMA_HOST=0.0.0.0:11543 ollama list 2>/dev/null || echo "  Could not retrieve model list"
+        
+        # Cache information
+        echo "💾 Cache status:"
+        echo "  📦 Ollama models cache: ${{ steps.cache-ollama-models.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }}"
+        echo "  📦 Ollama binary cache: ${{ steps.cache-ollama-bin.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }}"
+        
+        # Files generated
+        echo "📁 Generated files:"
+        ls -la logs/ 2>/dev/null || echo "  No logs directory"
+        
+        echo "📜 Complete timeline:"
+        cat logs/timeline.log 2>/dev/null || echo "  No timeline log found"
+        
+        echo "============================================================"
+        
+    - name: 🧹 Cleanup Processes
       if: always()
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Starting cleanup" >> logs/timeline.log
-        
-        echo "==================== FINAL STATUS ===================="
-        echo "🕐 Workflow ending at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-        
-        echo "📊 Final memory status:"
-        free -h
-        
-        echo "📋 Process list:"
-        ps aux | grep -E "(ollama|cloudflared)" | grep -v grep || echo "No processes found"
-        
-        echo "📁 Generated files:"
-        ls -la logs/ || echo "No logs directory"
-        
-        echo "📜 Timeline log:"
-        cat logs/timeline.log 2>/dev/null || echo "No timeline log"
-        
         echo "🧹 Cleaning up processes..."
         
-        # Kill monitor
+        # Stop monitoring
         if [[ -f logs/monitor.pid ]]; then
-          kill $(cat logs/monitor.pid) 2>/dev/null || true
+          MONITOR_PID=$(cat logs/monitor.pid)
+          kill $MONITOR_PID 2>/dev/null || true
+          echo "✅ Monitor process stopped"
         fi
         
-        # Kill tunnel
+        # Stop tunnel
         if [[ -f logs/tunnel.pid ]]; then
-          kill $(cat logs/tunnel.pid) 2>/dev/null || true
+          TUNNEL_PID=$(cat logs/tunnel.pid)
+          kill $TUNNEL_PID 2>/dev/null || true
+          echo "✅ Tunnel process stopped"
         fi
         
-        # Kill Ollama
+        # Stop Ollama gracefully
         if [[ -f logs/ollama.pid ]]; then
-          kill $(cat logs/ollama.pid) 2>/dev/null || true
+          OLLAMA_PID=$(cat logs/ollama.pid)
+          kill $OLLAMA_PID 2>/dev/null || true
+          echo "✅ Ollama process stopped"
         fi
+        
+        # Wait for graceful shutdown
+        sleep 5
         
         # Force kill any remaining processes
-        pkill -f cloudflared || true
-        pkill -f ollama || true
+        sudo pkill -f cloudflared || true
+        sudo pkill -f ollama || true
         
-        echo "✅ Cleanup completed"
-        echo "=================================================="
+        echo "✅ All processes cleaned up"
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Cleanup completed" >> logs/timeline.log
         
-    - name: 💾 Upload Logs as Artifacts
+    - name: 💾 Upload Comprehensive Logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
