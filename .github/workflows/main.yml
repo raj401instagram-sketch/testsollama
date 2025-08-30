@@ -1,0 +1,80 @@
+name: Run GPT-OSS 20B with Ollama
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt to send to GPT-OSS'
+        required: true
+        default: 'Hello, how are you?'
+        type: string
+
+jobs:
+  run-gpt-oss:
+    # Use larger runner with more RAM - requires GitHub Team/Enterprise
+    # Standard runners only have 7GB RAM, not enough for GPT-OSS 20B
+    runs-on: ubuntu-latest-8-cores # 32GB RAM runner
+    # Alternative: ubuntu-latest-16-cores (64GB RAM) for better performance
+    
+    timeout-minutes: 30
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Check system resources
+      run: |
+        echo "=== System Information ==="
+        free -h
+        nproc
+        df -h
+        echo "=========================="
+    
+    - name: Install Ollama
+      run: |
+        curl -fsSL https://ollama.com/install.sh | sh
+        
+    - name: Start Ollama service
+      run: |
+        # Start Ollama in background
+        ollama serve &
+        sleep 10
+        
+        # Verify Ollama is running
+        curl -f http://localhost:11434/api/tags || (echo "Ollama failed to start" && exit 1)
+        
+    - name: Pull GPT-OSS 20B model
+      run: |
+        echo "Pulling GPT-OSS 20B model..."
+        ollama pull gpt-oss:20b
+        
+    - name: Verify model installation
+      run: |
+        echo "Available models:"
+        ollama list
+        
+    - name: Test GPT-OSS 20B
+      run: |
+        echo "Testing GPT-OSS 20B with prompt: ${{ github.event.inputs.prompt }}"
+        
+        # Run inference with the provided prompt
+        ollama run gpt-oss:20b "${{ github.event.inputs.prompt }}"
+        
+    - name: Run performance benchmark
+      run: |
+        echo "Running simple benchmark..."
+        time ollama run gpt-oss:20b "Explain quantum computing in one paragraph."
+        
+    - name: Memory usage after model load
+      run: |
+        echo "=== Memory Usage ==="
+        free -h
+        echo "=== Process Memory ==="
+        ps aux --sort=-%mem | head -10
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        # Stop Ollama and clean up
+        pkill ollama || true
+        rm -rf ~/.ollama/models/* || true
