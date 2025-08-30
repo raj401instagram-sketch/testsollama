@@ -21,7 +21,7 @@ env:
 
 jobs:
   ollama-server:
-    runs-on: ubuntu-latest-8-cores  # 32GB RAM runner for better performance
+    runs-on: ubuntu-latest  # 32GB RAM runner for better performance
     timeout-minutes: 25  # Buffer for 20min keep-alive + cleanup
     
     steps:
