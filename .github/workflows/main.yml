@@ -11,10 +11,9 @@ on:
 
 jobs:
   run-gpt-oss:
-    # Use larger runner with more RAM - requires GitHub Team/Enterprise
-    # Standard runners only have 7GB RAM, not enough for GPT-OSS 20B
-    runs-on: ubuntu-latest-8-cores # 32GB RAM runner
-    # Alternative: ubuntu-latest-16-cores (64GB RAM) for better performance
+    # WARNING: Standard free runners have 16GB RAM - may not be enough for GPT-OSS 20B
+    # This workflow will attempt to run but may fail due to memory constraints
+    runs-on: ubuntu-latest # 4-vCPU, 16GB RAM (free tier)
     
     timeout-minutes: 30
     
@@ -43,10 +42,16 @@ jobs:
         # Verify Ollama is running
         curl -f http://localhost:11434/api/tags || (echo "Ollama failed to start" && exit 1)
         
-    - name: Pull GPT-OSS 20B model
+    - name: Attempt to pull GPT-OSS 20B model (may fail due to memory)
       run: |
-        echo "Pulling GPT-OSS 20B model..."
-        ollama pull gpt-oss:20b
+        echo "Attempting to pull GPT-OSS 20B model..."
+        echo "WARNING: This may fail on free runners due to insufficient RAM"
+        
+        # Try to pull a smaller quantized version first
+        ollama pull gpt-oss:7b 2>/dev/null || echo "7B model not available"
+        
+        # Attempt 20B model (will likely fail on free tier)
+        ollama pull gpt-oss:20b || echo "20B model failed - insufficient memory"
         
     - name: Verify model installation
       run: |
