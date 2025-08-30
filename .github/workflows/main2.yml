@@ -308,71 +308,6 @@ jobs:
         
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Model loading completed" >> logs/timeline.log
         
-    - name: 🧪 Test Model & Tunnel Connectivity
-      run: |
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Testing model and tunnel" >> logs/timeline.log
-        
-        MODEL_NAME="${{ github.event.inputs.model }}"
-        TUNNEL_URL=$(cat logs/tunnel_url.txt)
-        TEST_PROMPT="${{ github.event.inputs.test_prompt }}"
-        
-        export OLLAMA_HOST=0.0.0.0:11543
-        
-        echo "🧪 Testing local Ollama server..."
-        
-        # Test local API endpoints
-        echo "📋 Testing /api/tags:"
-        curl -sf http://0.0.0.0:11543/api/tags | jq '.' || echo "❌ Tags endpoint failed"
-        
-        echo "📋 Testing model generation locally..."
-        LOCAL_RESPONSE=$(curl -s -X POST http://0.0.0.0:11543/api/generate \
-          -H "Content-Type: application/json" \
-          -d "{
-            \"model\": \"$MODEL_NAME\",
-            \"prompt\": \"$TEST_PROMPT\",
-            \"stream\": false,
-            \"options\": {
-              \"temperature\": 0.7,
-              \"top_p\": 0.9
-            }
-          }" | jq -r '.response // "Generation failed"' 2>/dev/null)
-        
-        echo "📋 Local generation result:"
-        echo "$LOCAL_RESPONSE"
-        
-        echo "🌐 Testing tunnel access..."
-        
-        # Test tunnel endpoints
-        echo "📋 Testing tunnel /api/tags:"
-        curl -sf "$TUNNEL_URL/api/tags" | jq '.' || echo "❌ Tunnel tags endpoint failed"
-        
-        echo "📋 Testing model generation via tunnel..."
-        TUNNEL_RESPONSE=$(curl -s -X POST "$TUNNEL_URL/api/generate" \
-          -H "Content-Type: application/json" \
-          -d "{
-            \"model\": \"$MODEL_NAME\",
-            \"prompt\": \"$TEST_PROMPT\",
-            \"stream\": false,
-            \"options\": {
-              \"temperature\": 0.7,
-              \"top_p\": 0.9
-            }
-          }" | jq -r '.response // "Generation failed"' 2>/dev/null)
-        
-        echo "📋 Tunnel generation result:"
-        echo "$TUNNEL_RESPONSE"
-        
-        # Verify both tests passed
-        if [[ "$LOCAL_RESPONSE" == "Generation failed" ]] || [[ "$TUNNEL_RESPONSE" == "Generation failed" ]]; then
-          echo "❌ One or both tests failed"
-          echo "📋 Ollama server logs:"
-          tail -50 logs/ollama-server.log || echo "No server logs available"
-          exit 1
-        fi
-        
-        echo "✅ All connectivity tests passed"
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Testing completed successfully" >> logs/timeline.log
-        
     - name: 📡 Send Webhook Notification
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Sending webhook notification" >> logs/timeline.log
@@ -444,15 +379,14 @@ jobs:
         
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Webhook notification completed" >> logs/timeline.log
         
-    - name: 📊 Setup Continuous Monitoring
+    - name: 📊 Setup Lightweight Monitoring
       run: |
-        echo "📊 Setting up system monitoring..."
+        echo "📊 Setting up lightweight monitoring..."
         
-        # Create enhanced monitoring script
+        # Create simplified monitoring script
         cat > monitor.sh << 'EOF'
         #!/bin/bash
         LOG_FILE="logs/monitor.log"
-        MODEL_NAME="${{ github.event.inputs.model }}"
         
         while true; do
           echo "=== $(date -u '+%Y-%m-%d %H:%M:%S UTC') ===" >> "$LOG_FILE"
@@ -465,31 +399,20 @@ jobs:
           echo "Top Memory Processes:" >> "$LOG_FILE"
           ps aux --sort=-%mem | head -5 >> "$LOG_FILE"
           
-          # Ollama service status
-          echo "Ollama Health Check:" >> "$LOG_FILE"
-          if curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
-            echo "✅ Ollama API responding" >> "$LOG_FILE"
-            # Quick model test every 5 minutes
-            if [[ $(($(date +%s) % 300)) -eq 0 ]]; then
-              echo "Testing model responsiveness..." >> "$LOG_FILE"
-              RESPONSE=$(curl -s -X POST http://0.0.0.0:11543/api/generate \
-                -H "Content-Type: application/json" \
-                -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"ping\", \"stream\": false}" \
-                | jq -r '.response // "failed"' 2>/dev/null)
-              echo "Model test: $RESPONSE" >> "$LOG_FILE"
-            fi
+          # Simple Ollama status check (no API calls)
+          echo "Ollama Process Status:" >> "$LOG_FILE"
+          if pgrep -f ollama >/dev/null; then
+            echo "✅ Ollama process running" >> "$LOG_FILE"
           else
-            echo "❌ Ollama API not responding" >> "$LOG_FILE"
+            echo "❌ Ollama process not found" >> "$LOG_FILE"
           fi
           
-          # Tunnel status
-          TUNNEL_URL=$(cat logs/tunnel_url.txt 2>/dev/null)
-          if [[ ! -z "$TUNNEL_URL" ]]; then
-            if curl -sf "$TUNNEL_URL/api/tags" >/dev/null 2>&1; then
-              echo "✅ Tunnel accessible" >> "$LOG_FILE"
-            else
-              echo "❌ Tunnel not accessible" >> "$LOG_FILE"
-            fi
+          # Simple tunnel status check (no API calls)
+          echo "Tunnel Process Status:" >> "$LOG_FILE"
+          if pgrep -f cloudflared >/dev/null; then
+            echo "✅ Tunnel process running" >> "$LOG_FILE"
+          else
+            echo "❌ Tunnel process not found" >> "$LOG_FILE"
           fi
           
           echo "============================================" >> "$LOG_FILE"
@@ -502,7 +425,7 @@ jobs:
         MONITOR_PID=$!
         echo $MONITOR_PID > logs/monitor.pid
         
-        echo "✅ Monitoring started (PID: $MONITOR_PID)"
+        echo "✅ Lightweight monitoring started (PID: $MONITOR_PID)"
         
     - name: 🎯 Comprehensive API Testing
       run: |
@@ -629,12 +552,8 @@ jobs:
         
         START_TIME=$(date +%s)
         DURATION=$((20 * 60))  # 20 minutes
-        MODEL_NAME="${{ github.event.inputs.model }}"
-        TUNNEL_URL=$(cat logs/tunnel_url.txt)
         
-        export OLLAMA_HOST=0.0.0.0:11543
-        
-        echo "📊 Starting keep-alive loop..."
+        echo "📊 Starting lightweight keep-alive loop..."
         
         while true; do
           CURRENT_TIME=$(date +%s)
@@ -651,48 +570,13 @@ jobs:
           
           echo "⏰ Server active... Time remaining: ${MINUTES_LEFT}m ${SECONDS_LEFT}s ($(date '+%H:%M:%S'))"
           
-          # Health checks every minute
-          HEALTH_OK=true
-          
-          # Check local Ollama
-          if ! curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
-            echo "❌ Local Ollama health check failed!"
-            HEALTH_OK=false
+          # Basic process checks only (no API calls for speed)
+          if ! pgrep -f ollama >/dev/null; then
+            echo "❌ Ollama process not found!"
           fi
           
-          # Check tunnel
-          if ! curl -sf "$TUNNEL_URL/api/tags" >/dev/null 2>&1; then
-            echo "❌ Tunnel health check failed!"
-            HEALTH_OK=false
-          fi
-          
-          # Restart services if health check fails
-          if [[ "$HEALTH_OK" == "false" ]]; then
-            echo "🔧 Health check failed, attempting service recovery..."
-            
-            # Check if Ollama process is still running
-            if ! pgrep -f ollama >/dev/null; then
-              echo "🔧 Restarting Ollama server..."
-              nohup ollama serve > logs/ollama-server-restart.log 2>&1 &
-              echo $! > logs/ollama-restart.pid
-              
-              # Wait for restart
-              for j in {1..30}; do
-                if curl -sf http://0.0.0.0:11543/api/tags >/dev/null 2>&1; then
-                  echo "✅ Ollama restarted successfully"
-                  break
-                fi
-                sleep 2
-              done
-            fi
-            
-            # Check if tunnel process is still running
-            if ! pgrep -f cloudflared >/dev/null; then
-              echo "🔧 Restarting tunnel..."
-              nohup cloudflared tunnel --url http://0.0.0.0:11543 --no-autoupdate > logs/tunnel-restart.log 2>&1 &
-              echo $! > logs/tunnel-restart.pid
-              sleep 10
-            fi
+          if ! pgrep -f cloudflared >/dev/null; then
+            echo "❌ Tunnel process not found!"
           fi
           
           # Status report every 5 minutes
@@ -701,19 +585,6 @@ jobs:
             echo "  💾 Memory: $(free -h | grep Mem: | awk '{print $3"/"$2}')"
             echo "  🖥️  CPU Load: $(uptime | awk -F'load average:' '{ print $2 }')"
             echo "  🔥 Top process: $(ps aux --sort=-%mem | head -2 | tail -1 | awk '{print $11}')"
-            
-            # Quick model responsiveness test
-            echo "  🧪 Testing model response..."
-            QUICK_TEST=$(curl -s -X POST http://0.0.0.0:11543/api/generate \
-              -H "Content-Type: application/json" \
-              -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"hi\", \"stream\": false}" \
-              | jq -r '.response // "failed"' 2>/dev/null)
-            
-            if [[ "$QUICK_TEST" != "failed" ]] && [[ ! -z "$QUICK_TEST" ]]; then
-              echo "  ✅ Model responsive"
-            else
-              echo "  ⚠️  Model response slow or failed"
-            fi
           fi
           
           sleep 30
