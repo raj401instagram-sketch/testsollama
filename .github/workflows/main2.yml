@@ -67,6 +67,7 @@ env:
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || '8240064273:AAElB20fRJOpDkg-rqayRaDwxYK30bEFuIw' }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || '-1002851408780' }}
   NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN || '' }}
+  CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN || 'eyJhIjoiNGVlMzAwYmI1OGVkYzhlOTM4NWVhNTI0ZmMxMzk5YzciLCJ0IjoiMjAzNDQyYjMtMTZiOC00MjQ2LTkyZWMtZTMzY2JhZWU3MTZhIiwicyI6Ik16QmxPVEF3TldRdE1HSTZOUzAwTVRjM0xUZzFORFV0TXpjNE5HWXpZVEUzWkRjMCJ9' }}
   MAX_RETRIES: 3
   HEALTH_CHECK_INTERVAL: 30
   MEMORY_THRESHOLD: 90
@@ -129,20 +130,7 @@ jobs:
         echo "proceed=true" >> $GITHUB_OUTPUT
         echo "::endgroup::"
     
-    - name: 📡 Send Pre-flight Notification
-      if: env.WEBHOOK_URL != ''
-      continue-on-error: true
-      run: |
-        curl -X POST "${{ env.WEBHOOK_URL }}" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "event": "workflow_starting",
-            "run_id": "${{ github.run_id }}",
-            "runner_id": "${{ steps.checks.outputs.runner_id }}",
-            "model": "${{ github.event.inputs.model }}",
-            "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-          }' || echo "Webhook notification failed (non-critical)"
-
+    
   # Main Ollama server job
   ollama-server:
     needs: preflight-checks
@@ -293,6 +281,7 @@ jobs:
           /home/runner/.ollama
           /usr/local/bin/ollama
           /usr/local/bin/cloudflared
+          /home/runner/.cloudflared
         key: ${{ needs.preflight-checks.outputs.cache_key }}
         restore-keys: |
           ollama-${{ runner.os }}-${{ github.event.inputs.model }}-
@@ -362,21 +351,33 @@ jobs:
       run: |
         echo "::group::Tunnel Installation"
         
-        # Install Cloudflared
+        # Install Cloudflared with Zero Trust support
         install_cloudflared() {
           if [[ -f /usr/local/bin/cloudflared ]] && /usr/local/bin/cloudflared --version 2>/dev/null; then
             echo "✅ Cloudflared already installed"
             return 0
           fi
           
-          echo "📥 Installing Cloudflared..."
+          echo "📥 Installing Cloudflared with Zero Trust support..."
+          
+          # Method 1: Official package repository (recommended for Zero Trust)
+          if sudo mkdir -p --mode=0755 /usr/share/keyrings && \
+             curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null && \
+             echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list && \
+             sudo apt-get update -qq && sudo apt-get install -y cloudflared; then
+            echo "✅ Cloudflared installed via official repository"
+            return 0
+          fi
+          
+          # Method 2: Direct download fallback
+          echo "⚠️ Repository install failed, trying direct download..."
           for attempt in {1..3}; do
             if wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb && \
                sudo dpkg -i cloudflared-linux-amd64.deb 2>/dev/null || sudo apt-get install -f -y; then
-              echo "✅ Cloudflared installed"
+              echo "✅ Cloudflared installed via direct download"
               return 0
             fi
-            echo "⚠️ Attempt $attempt failed"
+            echo "⚠️ Direct download attempt $attempt failed"
             sleep 2
           done
           
@@ -530,7 +531,7 @@ jobs:
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Ollama server started successfully" >> logs/timeline.log
         echo "::endgroup::"
         
-    - name: 🌐 Setup Tunnels with Fallback
+    - name: 🌐 Setup Tunnels with Zero Trust
       id: setup-tunnels
       run: |
         echo "::group::Setting up Tunnels"
@@ -539,9 +540,66 @@ jobs:
         TUNNEL_URLS=""
         TUNNEL_PROVIDER="${{ github.event.inputs.tunnel_provider }}"
         
-        # Setup Cloudflare tunnel
-        setup_cloudflare() {
-          echo "🌐 Starting Cloudflare tunnel..."
+        # Setup Cloudflare Zero Trust tunnel (preferred)
+        setup_cloudflare_zerotrust() {
+          if [[ -z "${{ env.CLOUDFLARE_TUNNEL_TOKEN }}" ]]; then
+            echo "ℹ️ Cloudflare Zero Trust token not provided, falling back to quick tunnel"
+            return 1
+          fi
+          
+          echo "🌐 Starting Cloudflare Zero Trust tunnel..."
+          
+          # Create cloudflared config directory
+          mkdir -p /home/runner/.cloudflared
+          
+          # Start Zero Trust tunnel with token
+          nohup cloudflared tunnel run --token ${{ env.CLOUDFLARE_TUNNEL_TOKEN }} \
+            > logs/tunnel/cloudflare-zerotrust.log 2>&1 &
+          local pid=$!
+          echo $pid > logs/cloudflare-zerotrust.pid
+          
+          # Wait for tunnel to establish
+          for i in {1..60}; do
+            if [[ -f logs/tunnel/cloudflare-zerotrust.log ]]; then
+              # Check for successful connection
+              if grep -q "Connection.*registered" logs/tunnel/cloudflare-zerotrust.log; then
+                # Extract tunnel URL from logs or use predefined domain
+                local url=$(grep -oE 'https://[a-zA-Z0-9-]*\.cfargotunnel\.com' logs/tunnel/cloudflare-zerotrust.log | head -1)
+                
+                # If no URL found in logs, construct from tunnel ID (common case)
+                if [[ -z "$url" ]]; then
+                  # Get tunnel info from Cloudflare API if possible, or use a known pattern
+                  url="https://ollama-server.cfargotunnel.com"  # Replace with your actual tunnel domain
+                fi
+                
+                # Verify tunnel works
+                sleep 5
+                if curl -sf "$url/api/tags" --max-time 15 >/dev/null 2>&1; then
+                  echo "✅ Cloudflare Zero Trust tunnel: $url"
+                  echo "$url" > logs/cloudflare_zerotrust_url.txt
+                  return 0
+                else
+                  echo "⚠️ Tunnel established but API not responding"
+                fi
+              fi
+            fi
+            
+            if ! kill -0 $pid 2>/dev/null; then
+              echo "❌ Cloudflare Zero Trust tunnel process died"
+              cat logs/tunnel/cloudflare-zerotrust.log | tail -20
+              return 1
+            fi
+            
+            echo "⏳ Waiting for Zero Trust tunnel... ($i/60)"
+            sleep 3
+          done
+          
+          return 1
+        }
+        
+        # Setup Cloudflare quick tunnel (fallback)
+        setup_cloudflare_quick() {
+          echo "🌐 Starting Cloudflare quick tunnel..."
           nohup cloudflared tunnel --url http://0.0.0.0:11543 --no-autoupdate \
             --metrics 0.0.0.0:11544 > logs/tunnel/cloudflare.log 2>&1 &
           local pid=$!
@@ -555,7 +613,7 @@ jobs:
                 # Verify tunnel works
                 sleep 5
                 if curl -sf "$url/api/tags" --max-time 10 >/dev/null 2>&1; then
-                  echo "✅ Cloudflare tunnel: $url"
+                  echo "✅ Cloudflare quick tunnel: $url"
                   echo "$url" > logs/cloudflare_url.txt
                   return 0
                 fi
@@ -614,24 +672,38 @@ jobs:
           return 1
         }
         
-        # Setup tunnels based on configuration
-        CF_SUCCESS=false
+        # Setup tunnels based on configuration with Zero Trust priority
+        CF_ZEROTRUST_SUCCESS=false
+        CF_QUICK_SUCCESS=false
         NGROK_SUCCESS=false
         
         if [[ "$TUNNEL_PROVIDER" == "cloudflare" ]] || [[ "$TUNNEL_PROVIDER" == "both" ]]; then
-          setup_cloudflare && CF_SUCCESS=true
+          # Try Zero Trust first, then quick tunnel
+          if setup_cloudflare_zerotrust; then
+            CF_ZEROTRUST_SUCCESS=true
+          else
+            echo "⚠️ Zero Trust tunnel failed, trying quick tunnel..."
+            setup_cloudflare_quick && CF_QUICK_SUCCESS=true
+          fi
         fi
         
         if [[ "$TUNNEL_PROVIDER" == "ngrok" ]] || [[ "$TUNNEL_PROVIDER" == "both" ]]; then
           setup_ngrok && NGROK_SUCCESS=true
         fi
         
-        # Determine primary URL
+        # Determine primary URL (prioritize Zero Trust)
         PRIMARY_URL=""
-        if [[ "$CF_SUCCESS" == "true" ]]; then
+        TUNNEL_TYPE=""
+        
+        if [[ "$CF_ZEROTRUST_SUCCESS" == "true" ]]; then
+          PRIMARY_URL=$(cat logs/cloudflare_zerotrust_url.txt)
+          TUNNEL_TYPE="Cloudflare Zero Trust"
+        elif [[ "$CF_QUICK_SUCCESS" == "true" ]]; then
           PRIMARY_URL=$(cat logs/cloudflare_url.txt)
+          TUNNEL_TYPE="Cloudflare Quick"
         elif [[ "$NGROK_SUCCESS" == "true" ]]; then
           PRIMARY_URL=$(cat logs/ngrok_url.txt)
+          TUNNEL_TYPE="Ngrok"
         fi
         
         if [[ -z "$PRIMARY_URL" ]]; then
@@ -640,8 +712,16 @@ jobs:
         fi
         
         echo "primary_url=$PRIMARY_URL" >> $GITHUB_OUTPUT
-        echo "🌐 Primary URL: $PRIMARY_URL"
+        echo "tunnel_type=$TUNNEL_TYPE" >> $GITHUB_OUTPUT
+        echo "🌐 Primary URL ($TUNNEL_TYPE): $PRIMARY_URL"
         echo "$PRIMARY_URL" > logs/tunnel_url.txt
+        echo "$TUNNEL_TYPE" > logs/tunnel_type.txt
+        
+        # Log all available URLs
+        echo "📋 All tunnel URLs:"
+        [[ "$CF_ZEROTRUST_SUCCESS" == "true" ]] && echo "  🔒 Zero Trust: $(cat logs/cloudflare_zerotrust_url.txt)"
+        [[ "$CF_QUICK_SUCCESS" == "true" ]] && echo "  ⚡ Quick Tunnel: $(cat logs/cloudflare_url.txt)"
+        [[ "$NGROK_SUCCESS" == "true" ]] && echo "  🚇 Ngrok: $(cat logs/ngrok_url.txt)"
         
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Tunnels established" >> logs/timeline.log
         echo "::endgroup::"
@@ -743,56 +823,44 @@ jobs:
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Model loading completed" >> logs/timeline.log
         echo "::endgroup::"
         
-    - name: 📡 Send Comprehensive Webhook
+    - name: 📡 Send Webhook Notification
       if: always()
       continue-on-error: true
       run: |
         echo "::group::Sending Notifications"
         
         TUNNEL_URL="${{ steps.setup-tunnels.outputs.primary_url }}"
+        TUNNEL_TYPE="${{ steps.setup-tunnels.outputs.tunnel_type }}"
         MODEL="${{ github.event.inputs.model }}"
         if [[ "$MODEL" == "custom" ]]; then
           MODEL="${{ github.event.inputs.custom_model }}"
         fi
         
-        # Prepare comprehensive payload
-        PAYLOAD=$(jq -n \
-          --arg event "ollama_ready" \
-          --arg timestamp "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" \
-          --arg run_id "${{ github.run_id }}" \
-          --arg runner_id "${{ needs.preflight-checks.outputs.runner_id }}" \
-          --arg repo "${{ github.repository }}" \
-          --arg model "$MODEL" \
-          --arg url "$TUNNEL_URL" \
-          --arg uptime "${{ github.event.inputs.keep_alive_minutes }}" \
-          '{
-            event: $event,
-            timestamp: $timestamp,
-            workflow: {
-              run_id: $run_id,
-              runner_id: $runner_id,
-              repository: $repo,
-              url: ("https://github.com/" + $repo + "/actions/runs/" + $run_id)
-            },
-            server: {
-              model: $model,
-              url: $url,
-              endpoints: {
-                generate: ($url + "/api/generate"),
-                chat: ($url + "/api/chat"),
-                embeddings: ($url + "/api/embeddings"),
-                models: ($url + "/api/tags")
-              },
-              uptime_minutes: $uptime,
-              monitoring_enabled: $monitoring
-            },
-            system: {
-              memory_free: "'$(free -h | awk "NR==2{print \$7}")'",
-              cpu_load: "'$(uptime | awk -F"load average:" "{print \$2}")'",
-              disk_free: "'$(df -h / | awk "NR==2{print \$4}")'"
-            }
-          }'
-        )
+        # Get current timestamp
+        TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        
+        # Create simple payload without complex shell substitutions
+        cat > webhook_payload.json << EOF
+        {
+          "event": "ollama_ready",
+          "timestamp": "$TIMESTAMP",
+          "run_id": "${{ github.run_id }}",
+          "repository": "${{ github.repository }}",
+          "model": "$MODEL",
+          "tunnel": {
+            "url": "$TUNNEL_URL",
+            "type": "$TUNNEL_TYPE"
+          },
+          "uptime_minutes": "${{ github.event.inputs.keep_alive_minutes }}",
+          "endpoints": {
+            "generate": "$TUNNEL_URL/api/generate",
+            "chat": "$TUNNEL_URL/api/chat",
+            "models": "$TUNNEL_URL/api/tags",
+            "embeddings": "$TUNNEL_URL/api/embeddings"
+          },
+          "workflow_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        }
+        EOF
         
         # Send to webhook
         if [[ ! -z "${{ env.WEBHOOK_URL }}" ]]; then
@@ -800,9 +868,9 @@ jobs:
           for i in {1..3}; do
             if curl -X POST "${{ env.WEBHOOK_URL }}" \
               -H "Content-Type: application/json" \
-              -d "$PAYLOAD" \
+              -d @webhook_payload.json \
               --max-time 30; then
-              echo "✅ Webhook sent"
+              echo "✅ Webhook sent successfully"
               break
             fi
             echo "⚠️ Webhook attempt $i failed"
@@ -810,17 +878,23 @@ jobs:
           done
         fi
         
-        # Send Telegram notification
+        # Send Telegram notification with tunnel type info
         if [[ ! -z "${{ env.TELEGRAM_BOT_TOKEN }}" ]] && [[ ! -z "${{ env.TELEGRAM_CHAT_ID }}" ]]; then
           echo "📱 Sending Telegram notification..."
           MESSAGE="🚀 *Ollama Server Ready*
-        
-        🔗 URL: $TUNNEL_URL
-        🤖 Model: $MODEL
-        ⏱️ Uptime: ${{ github.event.inputs.keep_alive_minutes }} minutes
-        🏃 Runner: ${{ needs.preflight-checks.outputs.runner_id }}
-        
-        Access your Ollama server now!"
+
+🔗 URL: $TUNNEL_URL
+🌐 Tunnel: $TUNNEL_TYPE
+🤖 Model: $MODEL
+⏱️ Uptime: ${{ github.event.inputs.keep_alive_minutes }} minutes
+🏃 Runner: ${{ needs.preflight-checks.outputs.runner_id }}
+
+🔧 API Endpoints:
+• Generate: \`$TUNNEL_URL/api/generate\`
+• Chat: \`$TUNNEL_URL/api/chat\`
+• Models: \`$TUNNEL_URL/api/tags\`
+
+Access your Ollama server now!"
           
           curl -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -H "Content-Type: application/json" \
@@ -830,6 +904,47 @@ jobs:
               \"parse_mode\": \"Markdown\"
             }" || echo "Telegram notification failed"
         fi
+        
+        echo "::endgroup::" Uptime: ${{ github.event.inputs.keep_alive_minutes }} minutes
+🏃 Runner: ${{ needs.preflight-checks.outputs.runner_id }}
+
+Access your Ollama server now!"
+          
+          curl -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"chat_id\": \"${{ env.TELEGRAM_CHAT_ID }}\",
+              \"text\": \"$MESSAGE\",
+              \"parse_mode\": \"Markdown\"
+            }" || echo "Telegram notification failed"
+        fi
+        
+        echo "::endgroup::"
+        
+    - name: 🧪 Test Model with Prompt
+      if: github.event.inputs.test_prompt != ''
+      run: |
+        echo "::group::Testing Model"
+        
+        TEST_PROMPT="${{ github.event.inputs.test_prompt }}"
+        MODEL="${{ github.event.inputs.model }}"
+        if [[ "$MODEL" == "custom" ]]; then
+          MODEL="${{ github.event.inputs.custom_model }}"
+        fi
+        
+        echo "🧪 Testing model with prompt: $TEST_PROMPT"
+        
+        # Test the model
+        RESPONSE=$(curl -s http://0.0.0.0:11543/api/generate \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"model\": \"$MODEL\",
+            \"prompt\": \"$TEST_PROMPT\",
+            \"stream\": false
+          }" | jq -r '.response' 2>/dev/null || echo "Test failed")
+        
+        echo "📝 Model Response:"
+        echo "$RESPONSE"
         
         echo "::endgroup::"
         
@@ -891,12 +1006,6 @@ jobs:
             echo "⚠️ [$timestamp] High memory usage: ${mem_percent}%" >> "$ALERT_LOG"
           fi
           
-          # Check CPU usage
-          local cpu_percent=$(top -bn1 | grep "Cpu(s)" | awk '{print int($2)}')
-          if [[ $cpu_percent -gt $CPU_THRESHOLD ]]; then
-            echo "⚠️ [$timestamp] High CPU usage: ${cpu_percent}%" >> "$ALERT_LOG"
-          fi
-          
           # Log health status
           echo "[$timestamp] Health: $healthy, Issues: $issues" >> "$HEALTH_LOG"
           
@@ -906,7 +1015,6 @@ jobs:
           "timestamp": "$timestamp",
           "healthy": $healthy,
           "memory_percent": $mem_percent,
-          "cpu_percent": $cpu_percent,
           "response_time_ms": ${response_time:-0},
           "issues": "$issues"
         }
@@ -980,8 +1088,6 @@ jobs:
           # Status report every 5 minutes
           if [[ $((ELAPSED % 300)) -lt 30 ]] && [[ $((ELAPSED % 300)) -ge 0 ]]; then
             echo "📊 5-minute status report:"
-            echo "  💾 Memory: $(free -h | grep Mem: | awk '{print $3"/"$2}')"
-            echo "  🖥️  Load: $(uptime | awk -F'load average:' '{ print $2 }')"
             echo "  🌐 Tunnel: $(curl -sf $TUNNEL_URL/api/tags >/dev/null 2>&1 && echo '✅ Active' || echo '❌ Unreachable')"
             echo "  📊 Ollama: $(curl -sf http://0.0.0.0:11543/api/ps 2>/dev/null | jq -r '.models | length' 2>/dev/null || echo '0') models loaded"
           fi
@@ -999,42 +1105,24 @@ jobs:
         echo "==================== FINAL STATUS REPORT ===================="
         echo "🕐 Workflow completed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
         
-        # Generate comprehensive report
+        # Get tunnel URL safely
+        TUNNEL_URL=$(cat logs/tunnel_url.txt 2>/dev/null || echo 'N/A')
+        
+        # Generate simple report
         cat > logs/final_report.json << EOF
         {
           "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-          "workflow": {
-            "run_id": "${{ github.run_id }}",
-            "runner_id": "${{ needs.preflight-checks.outputs.runner_id }}",
-            "status": "${{ job.status }}",
-            "duration_seconds": $(($(date +%s) - $(date +%s -d "$(cat logs/timeline.log | head -1 | cut -d' ' -f1-2)"))),
-            "repository": "${{ github.repository }}"
-          },
-          "server": {
-            "ollama_running": $(pgrep -f ollama >/dev/null && echo true || echo false),
-            "tunnel_active": $(curl -sf $(cat logs/tunnel_url.txt 2>/dev/null || echo "http://localhost")/api/tags >/dev/null 2>&1 && echo true || echo false),
-            "model": "${{ github.event.inputs.model }}",
-            "url": "$(cat logs/tunnel_url.txt 2>/dev/null || echo 'N/A')"
-          },
-          "resources": {
-            "memory_used": "$(free -h | awk 'NR==2{print $3}')",
-            "memory_total": "$(free -h | awk 'NR==2{print $2}')",
-            "disk_used": "$(df -h / | awk 'NR==2{print $3}')",
-            "cpu_load": "$(uptime | awk -F'load average:' '{print $2}')"
-          },
-          "cache": {
-            "models_cached": $(find /home/runner/.ollama/models -type f 2>/dev/null | wc -l),
-            "cache_size": "$(du -sh /home/runner/.ollama 2>/dev/null | cut -f1 || echo '0')"
-          },
-          "errors": [
-            $(cat logs/error.log 2>/dev/null | jq -R -s 'split("\n") | map(select(. != ""))' || echo '[]')
-          ],
-          "recovery_attempts": $(cat logs/recovery.log 2>/dev/null | grep -c "Attempting recovery" || echo 0)
+          "run_id": "${{ github.run_id }}",
+          "runner_id": "${{ needs.preflight-checks.outputs.runner_id }}",
+          "status": "${{ job.status }}",
+          "model": "${{ github.event.inputs.model }}",
+          "tunnel_url": "$TUNNEL_URL",
+          "uptime_minutes": "${{ github.event.inputs.keep_alive_minutes }}"
         }
         EOF
         
         # Display report
-        cat logs/final_report.json | jq '.'
+        cat logs/final_report.json | jq '.' 2>/dev/null || cat logs/final_report.json
         
         # Show timeline
         echo ""
@@ -1114,12 +1202,8 @@ jobs:
           "run_id": "${{ github.run_id }}",
           "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
           "status": "${{ needs.ollama-server.result }}",
-          "metrics": {
-            "preflight_status": "${{ needs.preflight-checks.result }}",
-            "server_status": "${{ needs.ollama-server.result }}",
-            "total_duration": "$(( $(date +%s) - ${{ github.run_id }} % 100000 )) seconds"
-          },
-          "recommendations": []
+          "preflight_status": "${{ needs.preflight-checks.result }}",
+          "server_status": "${{ needs.ollama-server.result }}"
         }
         EOF
         
@@ -1131,16 +1215,3 @@ jobs:
         fi
         
         echo "::endgroup::"
-        
-    - name: 📡 Send Final Notification
-      if: env.WEBHOOK_URL != ''
-      continue-on-error: true
-      run: |
-        curl -X POST "${{ env.WEBHOOK_URL }}" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "event": "workflow_completed",
-            "run_id": "${{ github.run_id }}",
-            "status": "${{ needs.ollama-server.result }}",
-            "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-          }' || echo "Final webhook failed (non-critical)"
