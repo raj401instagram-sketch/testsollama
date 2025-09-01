@@ -64,8 +64,8 @@ env:
   OLLAMA_KEEP_ALIVE: 30m
   OLLAMA_ORIGINS: "*"
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL || 'https://n8n-latest-l4cl.onrender.com/webhook/034c8802-f6d2-4819-b1fc-04b90835c013' }}
-  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || '' }}
-  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || '' }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || '8240064273:AAElB20fRJOpDkg-rqayRaDwxYK30bEFuIw' }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || '-1002851408780' }}
   NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN || '' }}
   MAX_RETRIES: 3
   HEALTH_CHECK_INTERVAL: 30
@@ -765,7 +765,6 @@ jobs:
           --arg model "$MODEL" \
           --arg url "$TUNNEL_URL" \
           --arg uptime "${{ github.event.inputs.keep_alive_minutes }}" \
-          --argjson monitoring "${{ github.event.inputs.enable_monitoring }}" \
           '{
             event: $event,
             timestamp: $timestamp,
