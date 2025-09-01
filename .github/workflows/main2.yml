@@ -129,8 +129,7 @@ jobs:
         echo "✅ Pre-flight checks passed"
         echo "proceed=true" >> $GITHUB_OUTPUT
         echo "::endgroup::"
-    
-    
+        
   # Main Ollama server job
   ollama-server:
     needs: preflight-checks
@@ -238,7 +237,7 @@ jobs:
         }
         EOF
         
-        cat logs/system_info.json | jq '.'
+        cat logs/system_info.json | jq '.' 2>/dev/null || cat logs/system_info.json
         echo "::endgroup::"
         
     - name: 📦 Advanced Cache Management
@@ -893,20 +892,6 @@ jobs:
 • Generate: \`$TUNNEL_URL/api/generate\`
 • Chat: \`$TUNNEL_URL/api/chat\`
 • Models: \`$TUNNEL_URL/api/tags\`
-
-Access your Ollama server now!"
-          
-          curl -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"chat_id\": \"${{ env.TELEGRAM_CHAT_ID }}\",
-              \"text\": \"$MESSAGE\",
-              \"parse_mode\": \"Markdown\"
-            }" || echo "Telegram notification failed"
-        fi
-        
-        echo "::endgroup::" Uptime: ${{ github.event.inputs.keep_alive_minutes }} minutes
-🏃 Runner: ${{ needs.preflight-checks.outputs.runner_id }}
 
 Access your Ollama server now!"
           
