@@ -24,7 +24,7 @@ env:
   OLLAMA_KEEP_ALIVE: 30m
   WEBHOOK_URL: https://n8n-latest-l4cl.onrender.com/webhook/034c8802-f6d2-4819-b1fc-04b90835c013
   # Use input token if provided, otherwise use secret
-  TUNNEL_TOKEN: ${{ github.event.inputs.tunnel_token || secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+  TUNNEL_TOKEN: ${{ github.event.inputs.tunnel_token || secrets.CLOUDFLARE_TUNNEL_TOKEN || eyJhIjoiNGVlMzAwYmI1OGVkYzhlOTM4NWVhNTI0ZmMxMzk5YzciLCJ0IjoiMjAzNDQyYjMtMTZiOC00MjQ2LTkyZWMtZTMzY2JhZWU3MTZhIiwicyI6Ik16QmxPVEF3TldRdE1HSTJOUzAwTVRjM0xUZzFORFV0TXpjNE5HWXpZVEUzWkRjMCJ9}}
 
 jobs:
   ollama-server:
