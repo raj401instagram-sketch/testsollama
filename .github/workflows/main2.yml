@@ -238,22 +238,6 @@ jobs:
         echo "📋 Tunnel PID: $TUNNEL_PID"
         echo "⏳ Waiting for tunnel to establish..."
         
-    - name: 🧪 Test Model Response
-      run: |
-        echo "🧪 Testing model response..."
-        MODEL_NAME="${{ github.event.inputs.model || 'qwen2.5:0.5b' }}"
-        TEST_PROMPT="${{ github.event.inputs.test_prompt || 'Hello! Please respond with your model name and capabilities.' }}"
-        
-        export OLLAMA_HOST=0.0.0.0:11543
-        
-        echo "📝 Test prompt: $TEST_PROMPT"
-        echo "🤖 Model response:"
-        
-        # Test the model with a timeout
-        timeout 30 ollama run "$MODEL_NAME" "$TEST_PROMPT" || echo "Test completed or timed out"
-        
-        echo "✅ Model test completed"
-        
     - name: 📡 Send Webhook Notification
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Sending webhook notification" >> logs/timeline.log
