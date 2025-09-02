@@ -231,7 +231,7 @@ jobs:
         ngrok config add-authtoken "${{ env.NGROK_AUTHTOKEN }}"
         
         # Start ngrok tunnel in background
-        nohup ngrok http 11543 --log=stdout > logs/ngrok.log 2>&1 &
+        nohup ngrok http --url=game-scorpion-assuring.ngrok-free.app 11543 --log=stdout > logs/ngrok.log 2>&1 &
         NGROK_PID=$!
         echo $NGROK_PID > logs/ngrok.pid
         
