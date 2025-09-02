@@ -1,4 +1,4 @@
-name: Ollama Server with Managed Cloudflare Tunnel
+name: Ollama Server with ngrok Tunnel
 
 on:
   workflow_dispatch:
@@ -13,8 +13,8 @@ on:
         required: false
         default: 'Hello! Please respond with your model name and capabilities.'
         type: string
-      tunnel_token:
-        description: 'Cloudflare Tunnel Token (leave empty to use secret)'
+      ngrok_authtoken:
+        description: 'ngrok Auth Token (leave empty to use secret)'
         required: false
         type: string
 
@@ -24,7 +24,7 @@ env:
   OLLAMA_KEEP_ALIVE: 30m
   WEBHOOK_URL: https://n8n-latest-l4cl.onrender.com/webhook/034c8802-f6d2-4819-b1fc-04b90835c013
   # Use input token if provided, otherwise use secret
-  TUNNEL_TOKEN: ${{ github.event.inputs.tunnel_token || secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+  NGROK_AUTHTOKEN: ${{ github.event.inputs.ngrok_authtoken || secrets.NGROK_AUTHTOKEN }}
 
 jobs:
   ollama-server:
@@ -63,21 +63,21 @@ jobs:
         mkdir -p /home/runner/.ollama
         chmod 755 /home/runner/.ollama
         
-    - name: 🔐 Validate Cloudflare Token
+    - name: 🔐 Validate ngrok Token
       run: |
-        echo "🔐 Validating Cloudflare tunnel token..."
+        echo "🔐 Validating ngrok auth token..."
         
-        if [[ -z "${{ env.TUNNEL_TOKEN }}" ]]; then
-          echo "❌ ERROR: No Cloudflare tunnel token provided!"
+        if [[ -z "${{ env.NGROK_AUTHTOKEN }}" ]]; then
+          echo "❌ ERROR: No ngrok auth token provided!"
           echo "Please either:"
-          echo "1. Add CLOUDFLARE_TUNNEL_TOKEN to your repository secrets"
+          echo "1. Add NGROK_AUTHTOKEN to your repository secrets"
           echo "2. Provide a token via the workflow input"
           exit 1
         fi
         
-        # Basic token format validation (JWT-like structure)
-        if [[ ! "${{ env.TUNNEL_TOKEN }}" =~ ^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
-          echo "⚠️  Warning: Token format may be invalid. Proceeding anyway..."
+        # Basic token format validation
+        if [[ ${#NGROK_AUTHTOKEN} -lt 20 ]]; then
+          echo "⚠️  Warning: Token appears too short. Please verify your ngrok authtoken."
         else
           echo "✅ Token format appears valid"
         fi
@@ -129,32 +129,29 @@ jobs:
         
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Ollama installation completed" >> logs/timeline.log
         
-    - name: 🔧 Install Cloudflare Tunnel (cloudflared)
+    - name: 🔧 Install ngrok
       run: |
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Installing cloudflared" >> logs/timeline.log
-        echo "📥 Installing Cloudflare Tunnel..."
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Installing ngrok" >> logs/timeline.log
+        echo "📥 Installing ngrok..."
         
         # Clean up any existing installations
-        sudo apt-get remove -y cloudflared 2>/dev/null || true
-        sudo rm -f /usr/local/bin/cloudflared
+        sudo apt-get remove -y ngrok 2>/dev/null || true
+        sudo rm -f /usr/local/bin/ngrok
         
-        # Add Cloudflare GPG key
-        sudo mkdir -p --mode=0755 /usr/share/keyrings
-        curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
-        
-        # Add Cloudflare repository
-        echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
-        
-        # Update and install cloudflared
-        sudo apt-get update -qq
-        sudo apt-get install -y cloudflared
+        # Install ngrok via apt
+        curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+          | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null \
+          && echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
+          | sudo tee /etc/apt/sources.list.d/ngrok.list \
+          && sudo apt update \
+          && sudo apt install ngrok
         
         # Verify installation
-        cloudflared --version
-        which cloudflared
+        ngrok version
+        which ngrok
         
-        echo "✅ Cloudflared installed successfully"
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Cloudflared installation completed" >> logs/timeline.log
+        echo "✅ ngrok installed successfully"
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - ngrok installation completed" >> logs/timeline.log
         
     - name: 🧹 Cleanup & Prepare Environment
       run: |
@@ -162,13 +159,13 @@ jobs:
         
         # Kill any existing processes
         sudo pkill -f ollama || echo "No existing Ollama processes"
-        sudo pkill -f cloudflared || echo "No existing cloudflared processes"
+        sudo pkill -f ngrok || echo "No existing ngrok processes"
         
         # Wait for cleanup
         sleep 3
         
         # Verify no processes are running
-        ps aux | grep -E "(ollama|cloudflared)" | grep -v grep || echo "✅ Environment clean"
+        ps aux | grep -E "(ollama|ngrok)" | grep -v grep || echo "✅ Environment clean"
         
         # Ensure proper permissions for .ollama directory
         sudo chown -R runner:runner /home/runner/.ollama
@@ -225,18 +222,46 @@ jobs:
         
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Ollama server started successfully" >> logs/timeline.log
         
-    - name: 🌐 Setup Cloudflare Managed Tunnel
+    - name: 🌐 Setup ngrok Tunnel
       run: |
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Setting up managed tunnel" >> logs/timeline.log
-        echo "🌐 Starting Cloudflare managed tunnel with token..."
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Setting up ngrok tunnel" >> logs/timeline.log
+        echo "🌐 Starting ngrok tunnel..."
         
-        # Start tunnel with token authentication
-        nohup cloudflared tunnel --no-autoupdate run --token "${{ env.TUNNEL_TOKEN }}" > logs/tunnel.log 2>&1 &
-        TUNNEL_PID=$!
-        echo $TUNNEL_PID > logs/tunnel.pid
+        # Configure ngrok with authtoken
+        ngrok config add-authtoken "${{ env.NGROK_AUTHTOKEN }}"
         
-        echo "📋 Tunnel PID: $TUNNEL_PID"
-        echo "⏳ Waiting for tunnel to establish..."
+        # Start ngrok tunnel in background
+        nohup ngrok http 11543 --log=stdout > logs/ngrok.log 2>&1 &
+        NGROK_PID=$!
+        echo $NGROK_PID > logs/ngrok.pid
+        
+        echo "📋 ngrok PID: $NGROK_PID"
+        echo "⏳ Waiting for ngrok tunnel to establish..."
+        
+        # Wait for ngrok to be ready
+        for i in {1..30}; do
+          if curl -sf http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1; then
+            echo "✅ ngrok tunnel is ready!"
+            break
+          fi
+          
+          if [[ $i -eq 30 ]]; then
+            echo "❌ ngrok failed to start after 30 attempts"
+            echo "📋 ngrok logs:"
+            tail -20 logs/ngrok.log 2>/dev/null || echo "No ngrok logs found"
+            exit 1
+          fi
+          
+          echo "⏳ Attempt $i/30: Waiting for ngrok... ($(date '+%H:%M:%S'))"
+          sleep 2
+        done
+        
+        # Get tunnel URL
+        TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+        echo "🌐 Tunnel URL: $TUNNEL_URL"
+        echo "$TUNNEL_URL" > logs/tunnel-url.txt
+        
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - ngrok tunnel established: $TUNNEL_URL" >> logs/timeline.log
         
     - name: 📡 Send Webhook Notification
       run: |
@@ -244,9 +269,20 @@ jobs:
         
         MODEL_NAME="${{ github.event.inputs.model || 'qwen2.5:0.5b' }}"
         
-        # For managed tunnels, we don't have a dynamic URL
-        # You should configure this in your Cloudflare dashboard
-        TUNNEL_INFO="Managed tunnel active - check Cloudflare dashboard for hostname"
+        # Get the tunnel URL
+        TUNNEL_URL=""
+        if [[ -f logs/tunnel-url.txt ]]; then
+          TUNNEL_URL=$(cat logs/tunnel-url.txt)
+        else
+          # Fallback: try to get URL from ngrok API
+          TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
+        fi
+        
+        if [[ -z "$TUNNEL_URL" || "$TUNNEL_URL" == "null" ]]; then
+          TUNNEL_INFO="ngrok tunnel active - unable to retrieve public URL"
+        else
+          TUNNEL_INFO="ngrok tunnel: $TUNNEL_URL"
+        fi
         
         # Create comprehensive webhook payload
         WEBHOOK_PAYLOAD=$(jq -n \
@@ -256,6 +292,7 @@ jobs:
           --arg repository "${{ github.repository }}" \
           --arg model "$MODEL_NAME" \
           --arg tunnel_status "$TUNNEL_INFO" \
+          --arg tunnel_url "$TUNNEL_URL" \
           --arg status "running" \
           --arg uptime "20 minutes" \
           '{
@@ -265,6 +302,7 @@ jobs:
             repository: $repository,
             model: $model,
             tunnel_status: $tunnel_status,
+            tunnel_url: $tunnel_url,
             server_config: {
               host: "0.0.0.0:11543",
               local_endpoints: {
@@ -274,7 +312,15 @@ jobs:
                 models: "http://0.0.0.0:11543/api/tags",
                 show: "http://0.0.0.0:11543/api/show",
                 ps: "http://0.0.0.0:11543/api/ps"
-              }
+              },
+              public_endpoints: ($tunnel_url | if . != "" and . != null then {
+                generate: (. + "/api/generate"),
+                chat: (. + "/api/chat"),
+                embeddings: (. + "/api/embeddings"),
+                models: (. + "/api/tags"),
+                show: (. + "/api/show"),
+                ps: (. + "/api/ps")
+              } else {} end)
             },
             server_status: $status,
             estimated_uptime: $uptime,
@@ -282,7 +328,7 @@ jobs:
               os: "ubuntu-latest",
               memory: "32GB"
             },
-            notes: "Using Cloudflare managed tunnel with token authentication. Access via pre-configured hostname in Cloudflare dashboard."
+            notes: "Using ngrok tunnel for public access. Tunnel URL provided in tunnel_url field."
           }'
         )
         
@@ -350,10 +396,17 @@ jobs:
             echo "❌ Ollama: Not running" >> "$LOG_FILE"
           fi
           
-          if pgrep -f cloudflared >/dev/null; then
-            echo "✅ Cloudflared: Running (PID: $(pgrep -f cloudflared))" >> "$LOG_FILE"
+          if pgrep -f ngrok >/dev/null; then
+            echo "✅ ngrok: Running (PID: $(pgrep -f ngrok))" >> "$LOG_FILE"
+            # Check tunnel URL
+            TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
+            if [[ -n "$TUNNEL_URL" && "$TUNNEL_URL" != "null" ]]; then
+              echo "  ✅ Tunnel: $TUNNEL_URL" >> "$LOG_FILE"
+            else
+              echo "  ❌ Tunnel: URL not available" >> "$LOG_FILE"
+            fi
           else
-            echo "❌ Cloudflared: Not running" >> "$LOG_FILE"
+            echo "❌ ngrok: Not running" >> "$LOG_FILE"
           fi
           
           # Disk usage
@@ -376,8 +429,18 @@ jobs:
       run: |
         echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Starting 20-minute keep-alive" >> logs/timeline.log
         echo "⏰ Keeping server alive for 20 minutes..."
-        echo "🌐 Server is accessible via your Cloudflare managed tunnel"
-        echo "📌 Check your Cloudflare Zero Trust dashboard for the tunnel hostname"
+        
+        # Get and display tunnel URL
+        TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
+        if [[ -n "$TUNNEL_URL" && "$TUNNEL_URL" != "null" ]]; then
+          echo "🌐 Server is accessible via ngrok tunnel: $TUNNEL_URL"
+          echo "📌 API endpoints available at:"
+          echo "  - Generate: $TUNNEL_URL/api/generate"
+          echo "  - Chat: $TUNNEL_URL/api/chat"
+          echo "  - Models: $TUNNEL_URL/api/tags"
+        else
+          echo "⚠️  Unable to retrieve tunnel URL. Check ngrok logs."
+        fi
         
         START_TIME=$(date +%s)
         DURATION=$((20 * 60))  # 20 minutes
@@ -416,13 +479,13 @@ jobs:
             sleep 5
           fi
           
-          if ! pgrep -f cloudflared >/dev/null; then
-            echo "❌ WARNING: Tunnel process not found!"
+          if ! pgrep -f ngrok >/dev/null; then
+            echo "❌ WARNING: ngrok process not found!"
             HEALTH_STATUS="❌"
-            # Attempt to restart tunnel
-            echo "🔄 Attempting to restart tunnel..."
-            nohup cloudflared tunnel --no-autoupdate run --token "${{ env.TUNNEL_TOKEN }}" > logs/tunnel-restart.log 2>&1 &
-            echo $! > logs/tunnel.pid
+            # Attempt to restart ngrok
+            echo "🔄 Attempting to restart ngrok..."
+            nohup ngrok http 11543 --log=stdout > logs/ngrok-restart.log 2>&1 &
+            echo $! > logs/ngrok.pid
             sleep 5
           fi
           
@@ -439,6 +502,14 @@ jobs:
             echo "  💾 Memory: $(free -h | grep Mem: | awk '{print $3"/"$2}')"
             echo "  🖥️  CPU Load: $(uptime | awk -F'load average:' '{ print $2 }')"
             echo "  💿 Disk: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
+            
+            # Show current tunnel URL
+            CURRENT_TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
+            if [[ -n "$CURRENT_TUNNEL_URL" && "$CURRENT_TUNNEL_URL" != "null" ]]; then
+              echo "  🌐 Tunnel: $CURRENT_TUNNEL_URL"
+            else
+              echo "  ⚠️  Tunnel: URL not available"
+            fi
             
             # Show running models
             export OLLAMA_HOST=0.0.0.0:11543
@@ -471,11 +542,18 @@ jobs:
         
         # Tunnel status
         echo ""
-        echo "🌐 CLOUDFLARE TUNNEL STATUS:"
-        if pgrep -f cloudflared >/dev/null; then
-          echo "  ✅ Process: Running (PID: $(pgrep -f cloudflared))"
-          echo "  🔐 Authentication: Token-based (managed tunnel)"
-          echo "  📌 Access: Via pre-configured hostname in Cloudflare dashboard"
+        echo "🌐 NGROK TUNNEL STATUS:"
+        if pgrep -f ngrok >/dev/null; then
+          echo "  ✅ Process: Running (PID: $(pgrep -f ngrok))"
+          
+          # Get tunnel details
+          TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
+          if [[ -n "$TUNNEL_URL" && "$TUNNEL_URL" != "null" ]]; then
+            echo "  🌐 Public URL: $TUNNEL_URL"
+            echo "  📡 API Access: $TUNNEL_URL/api/tags"
+          else
+            echo "  ⚠️  Public URL: Not available"
+          fi
         else
           echo "  ❌ Process: Not running"
         fi
@@ -502,7 +580,7 @@ jobs:
         # Process status
         echo ""
         echo "🔄 RUNNING PROCESSES:"
-        ps aux | grep -E "(ollama|cloudflared)" | grep -v grep | sed 's/^/  /' || echo "  No relevant processes found"
+        ps aux | grep -E "(ollama|ngrok)" | grep -v grep | sed 's/^/  /' || echo "  No relevant processes found"
         
         # Cache information
         echo ""
@@ -528,13 +606,13 @@ jobs:
           echo "  No timeline log found"
         fi
         
-        # Tunnel logs summary
+        # ngrok logs summary
         echo ""
-        echo "🌐 TUNNEL CONNECTION LOGS (last 10 lines):"
-        if [[ -f logs/tunnel.log ]]; then
-          tail -10 logs/tunnel.log | sed 's/^/  /'
+        echo "🌐 NGROK TUNNEL LOGS (last 10 lines):"
+        if [[ -f logs/ngrok.log ]]; then
+          tail -10 logs/ngrok.log | sed 's/^/  /'
         else
-          echo "  No tunnel logs found"
+          echo "  No ngrok logs found"
         fi
         
         echo ""
@@ -553,11 +631,11 @@ jobs:
           echo "✅ Monitor process stopped"
         fi
         
-        # Stop tunnel
-        if [[ -f logs/tunnel.pid ]]; then
-          TUNNEL_PID=$(cat logs/tunnel.pid)
-          kill $TUNNEL_PID 2>/dev/null || true
-          echo "✅ Tunnel process stopped"
+        # Stop ngrok
+        if [[ -f logs/ngrok.pid ]]; then
+          NGROK_PID=$(cat logs/ngrok.pid)
+          kill $NGROK_PID 2>/dev/null || true
+          echo "✅ ngrok process stopped"
         fi
         
         # Stop Ollama gracefully
@@ -571,7 +649,7 @@ jobs:
         sleep 5
         
         # Force kill any remaining processes
-        sudo pkill -f cloudflared || true
+        sudo pkill -f ngrok || true
         sudo pkill -f ollama || true
         
         echo "✅ All processes cleaned up"
@@ -599,39 +677,53 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         
         # Tunnel info
-        echo "### 🌐 Cloudflare Tunnel" >> $GITHUB_STEP_SUMMARY
-        echo "- **Type**: Managed tunnel with token authentication" >> $GITHUB_STEP_SUMMARY
-        echo "- **Status**: Check your [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/) for tunnel details" >> $GITHUB_STEP_SUMMARY
-        echo "- **Note**: Access your Ollama server using the hostname configured in your Cloudflare dashboard" >> $GITHUB_STEP_SUMMARY
+        echo "### 🌐 ngrok Tunnel" >> $GITHUB_STEP_SUMMARY
+        TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
+        if [[ -n "$TUNNEL_URL" && "$TUNNEL_URL" != "null" ]]; then
+          echo "- **Status**: ✅ Active" >> $GITHUB_STEP_SUMMARY
+          echo "- **Public URL**: [$TUNNEL_URL]($TUNNEL_URL)" >> $GITHUB_STEP_SUMMARY
+          echo "- **API Test**: [$TUNNEL_URL/api/tags]($TUNNEL_URL/api/tags)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Status**: ❌ URL not available" >> $GITHUB_STEP_SUMMARY
+          echo "- **Note**: Check ngrok logs for connection issues" >> $GITHUB_STEP_SUMMARY
+        fi
         echo "" >> $GITHUB_STEP_SUMMARY
         
         # API Endpoints
-        echo "### 🔌 API Endpoints (via tunnel hostname)" >> $GITHUB_STEP_SUMMARY
-        echo "Replace \`<your-tunnel-hostname>\` with your configured hostname:" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-        echo "https://<your-tunnel-hostname>/api/generate" >> $GITHUB_STEP_SUMMARY
-        echo "https://<your-tunnel-hostname>/api/chat" >> $GITHUB_STEP_SUMMARY
-        echo "https://<your-tunnel-hostname>/api/embeddings" >> $GITHUB_STEP_SUMMARY
-        echo "https://<your-tunnel-hostname>/api/tags" >> $GITHUB_STEP_SUMMARY
-        echo "https://<your-tunnel-hostname>/api/show" >> $GITHUB_STEP_SUMMARY
-        echo "https://<your-tunnel-hostname>/api/ps" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔌 API Endpoints" >> $GITHUB_STEP_SUMMARY
+        if [[ -n "$TUNNEL_URL" && "$TUNNEL_URL" != "null" ]]; then
+          echo "All endpoints are accessible via your ngrok tunnel:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "$TUNNEL_URL/api/generate" >> $GITHUB_STEP_SUMMARY
+          echo "$TUNNEL_URL/api/chat" >> $GITHUB_STEP_SUMMARY
+          echo "$TUNNEL_URL/api/embeddings" >> $GITHUB_STEP_SUMMARY
+          echo "$TUNNEL_URL/api/tags" >> $GITHUB_STEP_SUMMARY
+          echo "$TUNNEL_URL/api/show" >> $GITHUB_STEP_SUMMARY
+          echo "$TUNNEL_URL/api/ps" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "Endpoints not available - tunnel URL could not be retrieved." >> $GITHUB_STEP_SUMMARY
+        fi
         echo "" >> $GITHUB_STEP_SUMMARY
         
         # Example usage
         echo "### 💡 Example Usage" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "# Test the connection" >> $GITHUB_STEP_SUMMARY
-        echo "curl https://<your-tunnel-hostname>/api/tags" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "# Generate a response" >> $GITHUB_STEP_SUMMARY
-        echo "curl https://<your-tunnel-hostname>/api/generate \\" >> $GITHUB_STEP_SUMMARY
-        echo "  -d '{" >> $GITHUB_STEP_SUMMARY
-        echo '    "model": "${{ github.event.inputs.model || 'qwen2.5:0.5b' }}",' >> $GITHUB_STEP_SUMMARY
-        echo '    "prompt": "Hello, how are you?",' >> $GITHUB_STEP_SUMMARY
-        echo '    "stream": false' >> $GITHUB_STEP_SUMMARY
-        echo "  }'" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        if [[ -n "$TUNNEL_URL" && "$TUNNEL_URL" != "null" ]]; then
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Test the connection" >> $GITHUB_STEP_SUMMARY
+          echo "curl $TUNNEL_URL/api/tags" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Generate a response" >> $GITHUB_STEP_SUMMARY
+          echo "curl $TUNNEL_URL/api/generate \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -d '{" >> $GITHUB_STEP_SUMMARY
+          echo '    "model": "${{ github.event.inputs.model || 'qwen2.5:0.5b' }}",' >> $GITHUB_STEP_SUMMARY
+          echo '    "prompt": "Hello, how are you?",' >> $GITHUB_STEP_SUMMARY
+          echo '    "stream": false' >> $GITHUB_STEP_SUMMARY
+          echo "  }'" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "Example usage not available - tunnel URL could not be retrieved." >> $GITHUB_STEP_SUMMARY
+        fi
         echo "" >> $GITHUB_STEP_SUMMARY
         
         # Status
@@ -642,10 +734,10 @@ jobs:
           echo "- ❌ Ollama server: **Stopped**" >> $GITHUB_STEP_SUMMARY
         fi
         
-        if pgrep -f cloudflared >/dev/null; then
-          echo "- ✅ Cloudflare tunnel: **Active**" >> $GITHUB_STEP_SUMMARY
+        if pgrep -f ngrok >/dev/null; then
+          echo "- ✅ ngrok tunnel: **Active**" >> $GITHUB_STEP_SUMMARY
         else
-          echo "- ❌ Cloudflare tunnel: **Inactive**" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ ngrok tunnel: **Inactive**" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY
