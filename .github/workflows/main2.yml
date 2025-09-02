@@ -21,7 +21,7 @@ on:
 env:
   OLLAMA_HOST: 0.0.0.0:11543
   OLLAMA_MODELS: /home/runner/.ollama/models
-  OLLAMA_KEEP_ALIVE: 30m
+  OLLAMA_KEEP_ALIVE: 65m
   WEBHOOK_URL: https://n8n-latest-l4cl.onrender.com/webhook/034c8802-f6d2-4819-b1fc-04b90835c013
   # Use input token if provided, otherwise use secret
   NGROK_AUTHTOKEN: ${{ github.event.inputs.ngrok_authtoken || secrets.NGROK_AUTHTOKEN }}
@@ -29,7 +29,7 @@ env:
 jobs:
   ollama-server:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 65
     
     steps:
     - name: 🚀 Checkout repository
@@ -294,7 +294,7 @@ jobs:
           --arg tunnel_status "$TUNNEL_INFO" \
           --arg tunnel_url "$TUNNEL_URL" \
           --arg status "running" \
-          --arg uptime "20 minutes" \
+          --arg uptime "65 minutes" \
           '{
             event: $event,
             timestamp: $timestamp,
@@ -425,10 +425,10 @@ jobs:
         
         echo "✅ Monitoring started (PID: $MONITOR_PID)"
         
-    - name: ⏰ Keep Server Alive (20 Minutes)
+    - name: ⏰ Keep Server Alive (65 Minutes)
       run: |
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Starting 20-minute keep-alive" >> logs/timeline.log
-        echo "⏰ Keeping server alive for 20 minutes..."
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - Starting 65-minute keep-alive" >> logs/timeline.log
+        echo "⏰ Keeping server alive for 65 minutes..."
         
         # Get and display tunnel URL
         TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
@@ -443,7 +443,7 @@ jobs:
         fi
         
         START_TIME=$(date +%s)
-        DURATION=$((20 * 60))  # 20 minutes
+        DURATION=$((65 * 60))  # 65 minutes
         
         echo "📊 Starting keep-alive loop..."
         
@@ -453,7 +453,7 @@ jobs:
           REMAINING=$((DURATION - ELAPSED))
           
           if [[ $REMAINING -le 0 ]]; then
-            echo "⏰ 20 minutes completed, ending keep-alive"
+            echo "⏰ 65 minutes completed, ending keep-alive"
             break
           fi
           
